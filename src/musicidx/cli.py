@@ -16,6 +16,7 @@ from musicidx import __version__
 from musicidx.analyzer.basic_features import is_librosa_available, process_basic_analysis
 from musicidx.analyzer.embeddings import (
     DEFAULT_EMBEDDING_MODEL,
+    EmbeddingError,
     is_sentence_transformers_available,
     process_embeddings,
     search_semantic,
@@ -697,6 +698,12 @@ def search_semantic_command(
             limit=limit,
             include_missing=include_missing,
         )
+    except EmbeddingError as exc:
+        if json_output:
+            _print_json({"db_path": str(db_path), "query": query, "error": str(exc)})
+        else:
+            console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     finally:
         conn.close()
 
