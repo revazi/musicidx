@@ -32,8 +32,11 @@ from musicidx.config import (
     DB_PATH_ENV_VAR,
     DEFAULT_DB_FILENAME,
     DEFAULT_MODELS_DIRNAME,
+    FFPROBE_PATH_ENV_VAR,
+    FPCALC_PATH_ENV_VAR,
     MODELS_PATH_ENV_VAR,
     resolve_db_path,
+    resolve_executable,
     resolve_models_path,
 )
 from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
@@ -143,6 +146,8 @@ def _status(available: bool) -> str:
 @app.command("doctor")
 def doctor_command(json_output: JsonOption = False) -> None:
     """Check local dependencies and runtime capabilities."""
+    ffprobe_path = resolve_executable("ffprobe", FFPROBE_PATH_ENV_VAR)
+    fpcalc_path = resolve_executable("fpcalc", FPCALC_PATH_ENV_VAR)
     checks = [
         {
             "name": "SQLite",
@@ -156,13 +161,21 @@ def doctor_command(json_output: JsonOption = False) -> None:
         },
         {
             "name": "FFmpeg/ffprobe",
-            "status": _status(shutil.which("ffprobe") is not None),
-            "detail": shutil.which("ffprobe") or "ffprobe not found on PATH",
+            "status": _status(ffprobe_path is not None),
+            "detail": ffprobe_path
+            or (
+                "missing; install with `brew install ffmpeg` "
+                f"or set {FFPROBE_PATH_ENV_VAR}"
+            ),
         },
         {
             "name": "fpcalc",
-            "status": _status(shutil.which("fpcalc") is not None),
-            "detail": shutil.which("fpcalc") or "fpcalc not found on PATH",
+            "status": _status(fpcalc_path is not None),
+            "detail": fpcalc_path
+            or (
+                "missing; install with `brew install chromaprint` "
+                f"or set {FPCALC_PATH_ENV_VAR}"
+            ),
         },
         {
             "name": "Ollama",
@@ -338,7 +351,7 @@ def metadata_command(
 
     if not payload["ffprobe_available"]:
         console.print(
-            "[yellow]ffprobe is not available on PATH; metadata extraction failed.[/yellow]"
+            "[yellow]ffprobe is not available; install with `brew install ffmpeg`.[/yellow]"
         )
 
     table = Table(title="Metadata summary")
@@ -421,7 +434,7 @@ def fingerprint_command(
 
     if not payload["fpcalc_available"]:
         console.print(
-            "[yellow]fpcalc is not available on PATH; fingerprinting failed.[/yellow]"
+            "[yellow]fpcalc is not available; install with `brew install chromaprint`.[/yellow]"
         )
 
     table = Table(title="Fingerprint summary")

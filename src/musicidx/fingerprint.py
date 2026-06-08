@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from musicidx.config import FPCALC_PATH_ENV_VAR, resolve_executable
 from musicidx.db import utc_now
 
 
@@ -77,17 +77,26 @@ class DuplicateGroup:
 
 
 def is_fpcalc_available() -> bool:
-    """Return True when fpcalc is available on PATH."""
-    return shutil.which("fpcalc") is not None
+    """Return True when fpcalc is available on PATH or configured explicitly."""
+    return resolve_executable("fpcalc", FPCALC_PATH_ENV_VAR) is not None
 
 
 def fingerprint_path(path: Path) -> TrackFingerprint:
     """Fingerprint one audio file with fpcalc JSON output."""
-    command = ["fpcalc", "-json", str(path)]
+    fpcalc = resolve_executable("fpcalc", FPCALC_PATH_ENV_VAR)
+    if fpcalc is None:
+        raise FingerprintError(
+            "fpcalc not found; install with `brew install chromaprint` "
+            f"or set {FPCALC_PATH_ENV_VAR}"
+        )
+    command = [fpcalc, "-json", str(path)]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
-        raise FingerprintError("fpcalc not found on PATH") from exc
+        raise FingerprintError(
+            "fpcalc not found; install with `brew install chromaprint` "
+            f"or set {FPCALC_PATH_ENV_VAR}"
+        ) from exc
 
     if result.returncode != 0:
         detail = result.stderr.strip() or "fpcalc returned a non-zero exit code"

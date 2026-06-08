@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 DB_PATH_ENV_VAR = "MUSICIDX_DB_PATH"
 MODELS_PATH_ENV_VAR = "MUSICIDX_MODELS_PATH"
+FFPROBE_PATH_ENV_VAR = "MUSICIDX_FFPROBE_PATH"
+FPCALC_PATH_ENV_VAR = "MUSICIDX_FPCALC_PATH"
 DEFAULT_DB_FILENAME = "musicidx.sqlite"
 DEFAULT_MODELS_DIRNAME = ".musicidx-models"
 
@@ -44,3 +47,18 @@ def resolve_models_path(path: Path | str | None = None) -> Path:
     if path is None:
         return default_models_path()
     return Path(path).expanduser()
+
+
+def resolve_executable(default_name: str, env_var: str) -> str | None:
+    """Resolve an executable from an env override or PATH.
+
+    Env overrides may be absolute paths, relative paths, or command names.
+    Missing path overrides return None so callers can report a clear diagnostic.
+    """
+    configured = os.environ.get(env_var)
+    if configured:
+        if "/" not in configured:
+            return shutil.which(configured)
+        configured_path = Path(configured).expanduser()
+        return str(configured_path) if configured_path.exists() else None
+    return shutil.which(default_name)

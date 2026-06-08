@@ -27,6 +27,7 @@ def test_fingerprint_path_parses_fpcalc_json(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr("musicidx.fingerprint.subprocess.run", fake_run)
+    monkeypatch.setattr("musicidx.fingerprint.resolve_executable", lambda name, env_var: name)
 
     fingerprint = fingerprint_path(track_path)
 

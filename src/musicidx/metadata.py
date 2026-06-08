@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import sqlite3
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from musicidx.config import FFPROBE_PATH_ENV_VAR, resolve_executable
 from musicidx.db import utc_now
 
 TAG_ALIASES = {
@@ -82,8 +82,8 @@ class TextSearchResult:
 
 
 def is_ffprobe_available() -> bool:
-    """Return True when ffprobe is available on PATH."""
-    return shutil.which("ffprobe") is not None
+    """Return True when ffprobe is available on PATH or configured explicitly."""
+    return resolve_executable("ffprobe", FFPROBE_PATH_ENV_VAR) is not None
 
 
 def extract_metadata(path: Path) -> TrackMetadata:
@@ -94,8 +94,15 @@ def extract_metadata(path: Path) -> TrackMetadata:
 
 def run_ffprobe(path: Path) -> dict[str, Any]:
     """Run ffprobe and return parsed JSON output."""
+    ffprobe = resolve_executable("ffprobe", FFPROBE_PATH_ENV_VAR)
+    if ffprobe is None:
+        raise MetadataExtractionError(
+            "ffprobe not found; install with `brew install ffmpeg` "
+            f"or set {FFPROBE_PATH_ENV_VAR}"
+        )
+
     command = [
-        "ffprobe",
+        ffprobe,
         "-v",
         "error",
         "-show_format",
@@ -107,7 +114,10 @@ def run_ffprobe(path: Path) -> dict[str, Any]:
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
-        raise MetadataExtractionError("ffprobe not found on PATH") from exc
+        raise MetadataExtractionError(
+            "ffprobe not found; install with `brew install ffmpeg` "
+            f"or set {FFPROBE_PATH_ENV_VAR}"
+        ) from exc
 
     if result.returncode != 0:
         detail = result.stderr.strip() or "ffprobe returned a non-zero exit code"

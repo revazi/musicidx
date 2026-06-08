@@ -53,6 +53,32 @@ musicidx analyze-tags --models-path /path/to/models
 
 ## Installation
 
+System tools for full local analysis on macOS:
+
+```bash
+brew install ffmpeg chromaprint
+```
+
+This provides:
+
+- `ffprobe` for metadata/technical audio extraction
+- `fpcalc` for Chromaprint fingerprinting
+
+Verify:
+
+```bash
+which ffprobe
+which fpcalc
+musicidx doctor
+```
+
+If binaries are installed outside `PATH`, configure them explicitly:
+
+```bash
+MUSICIDX_FFPROBE_PATH=/path/to/ffprobe musicidx metadata
+MUSICIDX_FPCALC_PATH=/path/to/fpcalc musicidx fingerprint
+```
+
 Development install:
 
 ```bash
@@ -164,7 +190,17 @@ After fingerprinting or full hashes, `musicidx duplicates` can report likely mov
 
 ### Extract metadata
 
-Requires `ffprobe` from FFmpeg for real files.
+Requires `ffprobe` from FFmpeg for real files. On macOS:
+
+```bash
+brew install ffmpeg
+```
+
+If needed, override the binary path:
+
+```bash
+MUSICIDX_FFPROBE_PATH=/path/to/ffprobe musicidx metadata
+```
 
 ```bash
 musicidx metadata
@@ -200,7 +236,17 @@ This uses SQLite FTS5 over metadata and generated profile text.
 
 ### Fingerprint tracks
 
-Requires `fpcalc` for real files.
+Requires `fpcalc` from Chromaprint for real files. On macOS:
+
+```bash
+brew install chromaprint
+```
+
+If needed, override the binary path:
+
+```bash
+MUSICIDX_FPCALC_PATH=/path/to/fpcalc musicidx fingerprint
+```
 
 ```bash
 musicidx fingerprint
@@ -325,7 +371,7 @@ Example using Discogs EffNet embedding plus genre and mood/theme classifier head
       "classifier_output": "PartitionedCall:0",
       "labels_file": "genre_discogs400-discogs-effnet-1.json",
       "top_k": 10,
-      "min_score": 0.15
+      "min_score": 0.0
     },
     {
       "name": "moodtheme-jamendo",
@@ -339,7 +385,7 @@ Example using Discogs EffNet embedding plus genre and mood/theme classifier head
       "classifier_output": "model/Sigmoid",
       "labels_file": "mtg_jamendo_moodtheme-discogs-effnet-1.json",
       "top_k": 10,
-      "min_score": 0.20
+      "min_score": 0.0
     }
   ]
 }
@@ -350,6 +396,8 @@ Supported manifest profiles:
 - `musicnn_classifier`
 - `effnet_classifier`
 - `direct_2d`
+
+Set `min_score` to `0.0` if you want best-guess tags for every track. This stores the top `top_k` predictions even when model confidence is low. Use a higher `min_score` only if you prefer sparse, higher-confidence tags.
 
 Review model licenses before commercial use.
 
