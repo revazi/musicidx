@@ -43,6 +43,8 @@ from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
 from musicidx.scanner import scan_library
+from musicidx.search.intent import parse_intent_dynamic
+from musicidx.search.ranker import search_music
 
 app = typer.Typer(help="Local-first music library index CLI.")
 models_app = typer.Typer(help="Manage local ML model files.")
@@ -90,6 +92,10 @@ LimitOption = Annotated[
     int,
     typer.Option("--limit", min=1, max=100, help="Maximum number of results."),
 ]
+OptionalLimitOption = Annotated[
+    int | None,
+    typer.Option("--limit", min=1, max=100, help="Maximum number of results."),
+]
 IncludeMissingOption = Annotated[
     bool,
     typer.Option("--include-missing", help="Include tracks marked missing from disk."),
@@ -132,6 +138,15 @@ BatchSizeOption = Annotated[
 RefreshOption = Annotated[
     bool,
     typer.Option("--refresh", help="Recompute embeddings even when stored text is current."),
+]
+SemanticModelOption = Annotated[
+    str,
+    typer.Option("--semantic-model", help="Embedding model name/path to use if indexed."),
+]
+ExplainOption = Annotated[bool, typer.Option("--explain", help="Include match explanations.")]
+SearchFormatOption = Annotated[
+    str,
+    typer.Option("--format", help="Output format: table, json, or m3u."),
 ]
 
 
@@ -750,6 +765,97 @@ def search_semantic_command(
     console.print(table)
 
 
+@app.command("parse")
+def parse_command(
+    query: SearchQueryArg,
+    db: DbOption = None,
+    limit: OptionalLimitOption = None,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    include_missing: IncludeMissingOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Parse a query into dynamic, library-aware search intent."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        intent = parse_intent_dynamic(
+            query,
+            conn,
+            limit=limit,
+            include_missing=include_missing,
+            semantic_model=semantic_model,
+        )
+    finally:
+        conn.close()
+
+    payload = {"db_path": str(db_path), "intent": intent.as_dict()}
+    if json_output:
+        _print_json(payload)
+        return
+    _print_json(payload)
+
+
+@app.command("search")
+def search_command(
+    query: SearchQueryArg,
+    db: DbOption = None,
+    limit: OptionalLimitOption = None,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    include_missing: IncludeMissingOption = False,
+    explain: ExplainOption = False,
+    output_format: SearchFormatOption = "table",
+    json_output: JsonOption = False,
+) -> None:
+    """Search the local library with dynamic hybrid ranking."""
+    if json_output:
+        output_format = "json"
+    if output_format not in {"table", "json", "m3u"}:
+        console.print("[red]Error:[/red] --format must be one of: table, json, m3u")
+        raise typer.Exit(1)
+
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        response = search_music(
+            conn,
+            query,
+            limit=limit,
+            include_missing=include_missing,
+            semantic_model=semantic_model,
+            explain=explain,
+        )
+    finally:
+        conn.close()
+
+    payload = {"db_path": str(db_path), **response.as_dict()}
+    if output_format == "json":
+        _print_json(payload)
+        return
+    if output_format == "m3u":
+        _print_m3u(response.results)
+        return
+
+    table = Table(title=f"Search: {query}")
+    table.add_column("#", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Title")
+    table.add_column("Artist")
+    table.add_column("Album")
+    table.add_column("Why" if explain else "Path")
+    for index, result in enumerate(response.results, start=1):
+        table.add_row(
+            str(index),
+            f"{result.score:.3f}",
+            result.title or "",
+            result.artist or "",
+            result.album or "",
+            "; ".join(result.explanation) if explain else result.path,
+        )
+    console.print(table)
+
+
 @models_app.command("path")
 def models_path_command(
     models_path: ModelsPathOption = None,
@@ -811,6 +917,16 @@ def models_list_command(
             ", ".join(model["missing_files"]),
         )
     console.print(table)
+
+
+def _print_m3u(results: list[Any]) -> None:
+    print("#EXTM3U")
+    for result in results:
+        artist_title = " - ".join(
+            part for part in [result.artist, result.title] if part
+        ) or result.path
+        print(f"#EXTINF:-1,{artist_title}")
+        print(result.path)
 
 
 def _sqlite_fts5_available() -> bool:
