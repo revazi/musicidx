@@ -189,9 +189,27 @@ class LibraryProfile:
 
 
 @dataclass(slots=True)
+class IntentHints:
+    """Optional high-level hints from an LLM parser."""
+
+    contexts: list[str] = field(default_factory=list)
+    prefer_tag_concepts: list[str] = field(default_factory=list)
+    avoid_tag_concepts: list[str] = field(default_factory=list)
+    feature_preferences: dict[str, str] = field(default_factory=dict)
+    limit: int | None = None
+    notes: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class SearchIntent:
     query: str
     limit: int
+    parser: str
+    llm_hints: IntentHints | None
+    llm_error: str | None
     contexts: list[str]
     query_terms: list[str]
     prefer_tag_concepts: list[str]
@@ -208,6 +226,9 @@ class SearchIntent:
         return {
             "query": self.query,
             "limit": self.limit,
+            "parser": self.parser,
+            "llm_hints": self.llm_hints.as_dict() if self.llm_hints else None,
+            "llm_error": self.llm_error,
             "contexts": self.contexts,
             "query_terms": self.query_terms,
             "prefer_tag_concepts": self.prefer_tag_concepts,
@@ -287,23 +308,35 @@ def parse_intent_dynamic(
     limit: int | None = None,
     include_missing: bool = False,
     semantic_model: str = DEFAULT_EMBEDDING_MODEL,
+    llm_hints: IntentHints | None = None,
+    parser: str = "dynamic",
+    llm_error: str | None = None,
 ) -> SearchIntent:
     """Parse a query using common listening priors plus the actual library vocabulary."""
     library_profile = build_library_profile(conn, include_missing=include_missing)
     query_terms = normalize_terms(query)
-    detected_contexts = _detect_contexts(query)
-    parsed_limit = limit or _parse_limit(query) or 10
+    detected_contexts = _unique(_detect_contexts(query) + (llm_hints.contexts if llm_hints else []))
+    parsed_limit = limit or (llm_hints.limit if llm_hints else None) or _parse_limit(query) or 10
 
     prefer_concepts: list[str] = []
     avoid_concepts: list[str] = []
     requested_feature_preferences: dict[str, list[str]] = {}
 
     for context in detected_contexts:
+        if context not in CONTEXT_PRIORS:
+            continue
         prior = CONTEXT_PRIORS[context]
         prefer_concepts.extend(prior.get("prefer", []))
         avoid_concepts.extend(prior.get("avoid", []))
         for field_name, level in prior.get("features", {}).items():
             requested_feature_preferences.setdefault(field_name, []).append(level)
+
+    if llm_hints is not None:
+        prefer_concepts.extend(llm_hints.prefer_tag_concepts)
+        avoid_concepts.extend(llm_hints.avoid_tag_concepts)
+        for field_name, level in llm_hints.feature_preferences.items():
+            if field_name in DEFAULT_FEATURE_RANGES and level in DEFAULT_FEATURE_RANGES[field_name]:
+                requested_feature_preferences.setdefault(field_name, []).append(level)
 
     # Unknown or specific query words still influence tag matching dynamically.
     prefer_concepts.extend(query_terms)
@@ -329,6 +362,9 @@ def parse_intent_dynamic(
     return SearchIntent(
         query=query,
         limit=max(1, min(100, parsed_limit)),
+        parser=parser,
+        llm_hints=llm_hints,
+        llm_error=llm_error,
         contexts=detected_contexts,
         query_terms=query_terms,
         prefer_tag_concepts=prefer_concepts,

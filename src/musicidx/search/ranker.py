@@ -10,6 +10,7 @@ from typing import Any
 from musicidx.analyzer.embeddings import EmbeddingError, search_semantic
 from musicidx.search.explain import build_explanation
 from musicidx.search.intent import (
+    IntentHints,
     SearchIntent,
     normalize_tag_terms,
     normalize_terms,
@@ -57,6 +58,9 @@ def search_music(
     include_missing: bool = False,
     semantic_model: str | None = None,
     explain: bool = False,
+    llm_hints: IntentHints | None = None,
+    parser: str = "dynamic",
+    llm_error: str | None = None,
 ) -> SearchResponse:
     """Search local tracks with dynamically parsed intent and hybrid ranking."""
     intent = parse_intent_dynamic(
@@ -65,6 +69,9 @@ def search_music(
         limit=limit,
         include_missing=include_missing,
         semantic_model=semantic_model or "sentence-transformers/all-MiniLM-L6-v2",
+        llm_hints=llm_hints,
+        parser=parser,
+        llm_error=llm_error,
     )
     track_rows = _select_track_candidates(conn, include_missing=include_missing)
     tags_by_track = _load_tags(conn, include_missing=include_missing)

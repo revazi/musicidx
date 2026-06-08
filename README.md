@@ -13,10 +13,11 @@ Implemented so far:
 - Basic audio feature extraction with `librosa`
 - Optional local Essentia ML mood/genre tagging
 - Optional semantic embeddings over enriched track profiles
+- Dynamic library-aware natural-language parsing and hybrid search
+- Optional OpenAI intent parsing hints with local DB-only ranking
 
 Not implemented yet:
 
-- Full natural-language hybrid search/ranking command
 - Playlist export
 - Feedback/evaluation loop
 - macOS UI
@@ -139,6 +140,8 @@ Search with current implemented commands:
 musicidx search-text "Nick Drake"
 musicidx search-text "ambient relaxing"
 musicidx search-semantic "chill atmospheric background music"
+musicidx parse "chill bar"
+musicidx search "chill bar" --limit 10 --explain
 ```
 
 Inspect the database:
@@ -443,6 +446,75 @@ sentence-transformers/all-MiniLM-L6-v2
 
 Note: the first run may download the sentence-transformers model if it is not already cached. For offline/local-only operation, pre-cache the model or pass a local model path with `--model`.
 
+## Dynamic natural-language search
+
+`musicidx parse` and `musicidx search` use the analyzed local library to generate dynamic search intent. The parser combines:
+
+- the user's query
+- actual local tags in `track_tags`
+- local audio-feature distributions
+- available profile embeddings
+- broad listening-context priors such as chill, bar, shower, focus, sleep, party, workout, sad/melancholic
+
+Parse a query:
+
+```bash
+musicidx parse "Give me 10 tracks for a chill bar"
+musicidx parse "shower music" --json
+```
+
+Search with hybrid ranking:
+
+```bash
+musicidx search "chill bar" --limit 10 --explain
+musicidx search "shower music" --format json
+musicidx search "focus ambient background" --format m3u
+musicidx search "melancholic reflective songs" --semantic-model .musicidx-models/all-MiniLM-L6-v2
+```
+
+Candidate scoring uses available signals:
+
+- semantic profile similarity, if embeddings exist for the selected model
+- ML mood/genre tag matches
+- audio feature range fit
+- SQLite FTS/profile text matches
+- simple artist diversity, max 2 tracks per artist by default
+
+Unknown queries still work through FTS and semantic/profile matching even when no context prior is detected.
+
+### Optional OpenAI intent parsing
+
+By default, parsing is local and deterministic. You can explicitly add OpenAI intent hints with `--llm`.
+
+Set your API key:
+
+```bash
+export OPENAI_API_KEY=your_key_here
+```
+
+Optional model override:
+
+```bash
+export MUSICIDX_OPENAI_MODEL=gpt-4o-mini
+```
+
+Use LLM-assisted parsing/search:
+
+```bash
+musicidx parse "Give me 10 tracks for a chill bar" --llm --json
+musicidx search "shower music" --llm --limit 10 --explain
+musicidx search "focus music for coding" --llm --format json
+```
+
+LLM behavior:
+
+- sends the query plus aggregate library profile only
+- does not send audio files
+- does not send full track lists
+- does not allow the LLM to recommend invented tracks
+- falls back to dynamic local parsing if OpenAI is unavailable or returns invalid JSON
+- final ranking always uses only tracks from the local SQLite database
+
 ## Example: current test-music workflow
 
 ```bash
@@ -482,6 +554,10 @@ musicidx analyze-tags --json
 musicidx tags --track-id <track-id> --json
 musicidx embed --json
 musicidx search-semantic "ambient" --json
+musicidx parse "chill bar" --json
+musicidx parse "chill bar" --llm --json
+musicidx search "chill bar" --json
+musicidx search "chill bar" --llm --json
 musicidx models list --json
 ```
 
@@ -508,4 +584,6 @@ uv run --no-project --with ruff ruff check .
 - Semantic embeddings are stored locally.
 - No telemetry is implemented.
 
-The only exception is optional dependency/model installation: tools like `pip`, `uv`, or `sentence-transformers` may download packages/models if you request them and they are not already cached.
+When `--llm` is used, MusicIdx sends the user query and aggregate library profile to OpenAI for intent parsing. It does not send audio files or full track lists. Do not use `--llm` if you want a fully local-only run.
+
+The other exception is optional dependency/model installation: tools like `pip`, `uv`, or `sentence-transformers` may download packages/models if you request them and they are not already cached.

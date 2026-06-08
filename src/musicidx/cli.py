@@ -35,6 +35,8 @@ from musicidx.config import (
     FFPROBE_PATH_ENV_VAR,
     FPCALC_PATH_ENV_VAR,
     MODELS_PATH_ENV_VAR,
+    OPENAI_API_KEY_ENV_VAR,
+    OPENAI_MODEL_ENV_VAR,
     resolve_db_path,
     resolve_executable,
     resolve_models_path,
@@ -43,7 +45,13 @@ from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
 from musicidx.scanner import scan_library
-from musicidx.search.intent import parse_intent_dynamic
+from musicidx.search.intent import build_library_profile, parse_intent_dynamic
+from musicidx.search.llm import (
+    LLMIntentError,
+    default_openai_model,
+    is_openai_configured,
+    parse_intent_openai,
+)
 from musicidx.search.ranker import search_music
 
 app = typer.Typer(help="Local-first music library index CLI.")
@@ -148,6 +156,18 @@ SearchFormatOption = Annotated[
     str,
     typer.Option("--format", help="Output format: table, json, or m3u."),
 ]
+UseLlmOption = Annotated[
+    bool,
+    typer.Option("--llm/--no-llm", help="Use OpenAI to add intent parsing hints."),
+]
+LlmModelOption = Annotated[
+    str | None,
+    typer.Option("--llm-model", help=f"OpenAI model. Defaults to {OPENAI_MODEL_ENV_VAR}."),
+]
+LlmTimeoutOption = Annotated[
+    float,
+    typer.Option("--llm-timeout", min=1.0, max=120.0, help="OpenAI timeout in seconds."),
+]
 
 
 def _print_json(payload: dict[str, Any]) -> None:
@@ -196,6 +216,13 @@ def doctor_command(json_output: JsonOption = False) -> None:
             "name": "Ollama",
             "status": _status(shutil.which("ollama") is not None),
             "detail": shutil.which("ollama") or "ollama not found on PATH",
+        },
+        {
+            "name": "OpenAI API key",
+            "status": _status(is_openai_configured()),
+            "detail": f"configured via {OPENAI_API_KEY_ENV_VAR}"
+            if is_openai_configured()
+            else f"missing; set {OPENAI_API_KEY_ENV_VAR} to use --llm",
         },
         {
             "name": "librosa",
@@ -772,6 +799,9 @@ def parse_command(
     limit: OptionalLimitOption = None,
     semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
     include_missing: IncludeMissingOption = False,
+    use_llm: UseLlmOption = False,
+    llm_model: LlmModelOption = None,
+    llm_timeout: LlmTimeoutOption = 30.0,
     json_output: JsonOption = False,
 ) -> None:
     """Parse a query into dynamic, library-aware search intent."""
@@ -779,12 +809,23 @@ def parse_command(
     conn = connect_db(db_path)
     try:
         init_db(conn)
+        llm_hints, parser, llm_error = _maybe_parse_with_llm(
+            conn,
+            query,
+            use_llm=use_llm,
+            llm_model=llm_model,
+            timeout_sec=llm_timeout,
+            include_missing=include_missing,
+        )
         intent = parse_intent_dynamic(
             query,
             conn,
             limit=limit,
             include_missing=include_missing,
             semantic_model=semantic_model,
+            llm_hints=llm_hints,
+            parser=parser,
+            llm_error=llm_error,
         )
     finally:
         conn.close()
@@ -805,6 +846,9 @@ def search_command(
     include_missing: IncludeMissingOption = False,
     explain: ExplainOption = False,
     output_format: SearchFormatOption = "table",
+    use_llm: UseLlmOption = False,
+    llm_model: LlmModelOption = None,
+    llm_timeout: LlmTimeoutOption = 30.0,
     json_output: JsonOption = False,
 ) -> None:
     """Search the local library with dynamic hybrid ranking."""
@@ -818,6 +862,14 @@ def search_command(
     conn = connect_db(db_path)
     try:
         init_db(conn)
+        llm_hints, parser, llm_error = _maybe_parse_with_llm(
+            conn,
+            query,
+            use_llm=use_llm,
+            llm_model=llm_model,
+            timeout_sec=llm_timeout,
+            include_missing=include_missing,
+        )
         response = search_music(
             conn,
             query,
@@ -825,6 +877,9 @@ def search_command(
             include_missing=include_missing,
             semantic_model=semantic_model,
             explain=explain,
+            llm_hints=llm_hints,
+            parser=parser,
+            llm_error=llm_error,
         )
     finally:
         conn.close()
@@ -917,6 +972,30 @@ def models_list_command(
             ", ".join(model["missing_files"]),
         )
     console.print(table)
+
+
+def _maybe_parse_with_llm(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    use_llm: bool,
+    llm_model: str | None,
+    timeout_sec: float,
+    include_missing: bool,
+) -> tuple[Any | None, str, str | None]:
+    if not use_llm:
+        return None, "dynamic", None
+    try:
+        profile = build_library_profile(conn, include_missing=include_missing)
+        hints = parse_intent_openai(
+            query,
+            profile,
+            model=llm_model or default_openai_model(),
+            timeout_sec=timeout_sec,
+        )
+    except LLMIntentError as exc:
+        return None, "dynamic", str(exc)
+    return hints, "dynamic+openai", None
 
 
 def _print_m3u(results: list[Any]) -> None:
