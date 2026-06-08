@@ -22,7 +22,7 @@ dev = [
   "ruff>=0.4",
 ]
 ml = [
-  "essentia-tensorflow>=2.1",
+  "essentia-tensorflow>=2.1b6.dev1389,<2.2",
 ]
 semantic = [
   "sentence-transformers>=3.0",

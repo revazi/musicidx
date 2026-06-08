@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+import json
+
+from musicidx.search.intent import LibraryProfile
+from musicidx.search.llm import intent_hints_from_json, parse_intent_gemini, parse_intent_openai
+
+
+def test_intent_hints_from_json_sanitizes_invalid_values():
+    hints = intent_hints_from_json(
+        {
+            "limit": 500,
+            "contexts": ["focus", "unknown"],
+            "prefer_tag_concepts": ["Ambient", "ambient", "Deep"],
+            "avoid_tag_concepts": ["Aggressive"],
+            "feature_preferences": {
+                "energy": "low_mid",
+                "tempo_bpm": "mid",
+                "unknown": "high",
+                "brightness": "invalid",
+            },
+            "notes": "library-aware intent",
+        }
+    )
+
+    assert hints.limit == 100
+    assert hints.contexts == ["focus"]
+    assert hints.prefer_tag_concepts == ["ambient", "deep"]
+    assert hints.avoid_tag_concepts == ["aggressive"]
+    assert hints.feature_preferences == {"energy": "low_mid", "tempo_bpm": "mid"}
+    assert hints.notes == "library-aware intent"
+
+
+def test_parse_intent_gemini_uses_generate_content(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            content = json.dumps(
+                {
+                    "limit": 8,
+                    "contexts": ["focus"],
+                    "prefer_tag_concepts": ["ambient", "background"],
+                    "avoid_tag_concepts": ["aggressive"],
+                    "feature_preferences": {"energy": "low_mid", "aggression": "low"},
+                    "notes": "gemini test",
+                }
+            )
+            payload = {"candidates": [{"content": {"parts": [{"text": content}]}}]}
+            return json.dumps(payload).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr("musicidx.search.llm.urllib.request.urlopen", fake_urlopen)
+
+    profile = LibraryProfile(
+        total_tracks=0,
+        tag_stats={},
+        feature_percentiles={},
+        embedding_models=[],
+    )
+    hints = parse_intent_gemini("focus music", profile, model="gemini-test", timeout_sec=6)
+
+    assert "models/gemini-test:generateContent" in captured["url"]
+    assert "key=test-gemini-key" in captured["url"]
+    assert captured["timeout"] == 6
+    assert captured["body"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert hints.limit == 8
+    assert hints.contexts == ["focus"]
+    assert hints.prefer_tag_concepts == ["ambient", "background"]
+    assert hints.feature_preferences == {"energy": "low_mid", "aggression": "low"}
+
+
+def test_parse_intent_openai_uses_chat_completions(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            content = json.dumps(
+                {
+                    "limit": 7,
+                    "contexts": ["chill"],
+                    "prefer_tag_concepts": ["relaxing", "ambient"],
+                    "avoid_tag_concepts": ["aggressive"],
+                    "feature_preferences": {"energy": "low_mid", "aggression": "low"},
+                    "notes": "test",
+                }
+            )
+            return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode())
+        captured["auth"] = request.headers["Authorization"]
+        return FakeResponse()
+
+    monkeypatch.setattr("musicidx.search.llm.urllib.request.urlopen", fake_urlopen)
+
+    profile = LibraryProfile(
+        total_tracks=0,
+        tag_stats={},
+        feature_percentiles={},
+        embedding_models=[],
+    )
+    hints = parse_intent_openai("chill music", profile, model="gpt-test", timeout_sec=5)
+
+    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+    assert captured["timeout"] == 5
+    assert captured["body"]["model"] == "gpt-test"
+    assert captured["auth"] == "Bearer test-key"
+    assert hints.limit == 7
+    assert hints.contexts == ["chill"]
+    assert hints.prefer_tag_concepts == ["relaxing", "ambient"]
+    assert hints.feature_preferences == {"energy": "low_mid", "aggression": "low"}

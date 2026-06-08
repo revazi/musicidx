@@ -94,6 +94,8 @@ Optional ML tag support:
 pip install -e '.[dev,ml]'
 ```
 
+The `ml` extra uses the currently published Essentia TensorFlow pre-release build because no stable `2.1` wheel is available on PyPI yet.
+
 Optional semantic embedding support:
 
 ```bash
@@ -468,6 +470,7 @@ Search with hybrid ranking:
 ```bash
 musicidx search "chill bar" --limit 10 --explain
 musicidx search "shower music" --format json
+musicidx search "shower music" --format json --concise
 musicidx search "focus ambient background" --format m3u
 musicidx search "melancholic reflective songs" --semantic-model .musicidx-models/all-MiniLM-L6-v2
 ```
@@ -482,20 +485,20 @@ Candidate scoring uses available signals:
 
 Unknown queries still work through FTS and semantic/profile matching even when no context prior is detected.
 
-### Optional OpenAI intent parsing
+### Optional Gemini/OpenAI intent parsing
 
-By default, parsing is local and deterministic. You can explicitly add OpenAI intent hints with `--llm`.
+By default, parsing is local and deterministic. You can explicitly add LLM intent hints with `--llm`. Gemini is the default provider.
 
-Set your API key:
+Set your Gemini API key:
 
 ```bash
-export OPENAI_API_KEY=your_key_here
+export GEMINI_API_KEY=your_key_here
 ```
 
-Optional model override:
+Optional Gemini model override:
 
 ```bash
-export MUSICIDX_OPENAI_MODEL=gpt-4o-mini
+export MUSICIDX_GEMINI_MODEL=gemini-1.5-flash
 ```
 
 Use LLM-assisted parsing/search:
@@ -503,7 +506,14 @@ Use LLM-assisted parsing/search:
 ```bash
 musicidx parse "Give me 10 tracks for a chill bar" --llm --json
 musicidx search "shower music" --llm --limit 10 --explain
-musicidx search "focus music for coding" --llm --format json
+musicidx search "focus music for coding" --llm --format json --concise
+```
+
+OpenAI remains available as an explicit provider:
+
+```bash
+export OPENAI_API_KEY=your_key_here
+musicidx search "chill bar" --llm --llm-provider openai --llm-model gpt-4o-mini
 ```
 
 LLM behavior:
@@ -512,7 +522,7 @@ LLM behavior:
 - does not send audio files
 - does not send full track lists
 - does not allow the LLM to recommend invented tracks
-- falls back to dynamic local parsing if OpenAI is unavailable or returns invalid JSON
+- falls back to dynamic local parsing if the selected LLM provider is unavailable or returns invalid JSON
 - final ranking always uses only tracks from the local SQLite database
 
 ## Example: current test-music workflow
@@ -557,7 +567,9 @@ musicidx search-semantic "ambient" --json
 musicidx parse "chill bar" --json
 musicidx parse "chill bar" --llm --json
 musicidx search "chill bar" --json
+musicidx search "chill bar" --json --concise
 musicidx search "chill bar" --llm --json
+musicidx search "chill bar" --llm --json --concise
 musicidx models list --json
 ```
 
@@ -584,6 +596,6 @@ uv run --no-project --with ruff ruff check .
 - Semantic embeddings are stored locally.
 - No telemetry is implemented.
 
-When `--llm` is used, MusicIdx sends the user query and aggregate library profile to OpenAI for intent parsing. It does not send audio files or full track lists. Do not use `--llm` if you want a fully local-only run.
+When `--llm` is used, MusicIdx sends the user query and aggregate library profile to the selected LLM provider, Gemini by default, for intent parsing. It does not send audio files or full track lists. Do not use `--llm` if you want a fully local-only run.
 
 The other exception is optional dependency/model installation: tools like `pip`, `uv`, or `sentence-transformers` may download packages/models if you request them and they are not already cached.

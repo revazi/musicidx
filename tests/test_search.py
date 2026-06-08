@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from musicidx.cli import _search_payload
 from musicidx.db import connect_db, init_db
 from musicidx.search.intent import parse_intent_dynamic
 from musicidx.search.ranker import search_music
@@ -76,6 +77,14 @@ def test_search_music_ranks_library_aware_chill_match_first(tmp_path):
         assert response.results[0].track_id == "chill-track"
         assert response.results[0].score > response.results[1].score
         assert response.results[0].explanation
+
+        payload = _search_payload(response, db_path="index.sqlite", concise=True)
+        assert payload["db_path"] == "index.sqlite"
+        assert payload["intent"]["contexts"] == ["chill", "bar"]
+        assert "library_profile" not in payload["intent"]
+        assert payload["results"][0]["track_id"] == "chill-track"
+        assert "breakdown" not in payload["results"][0]
+        assert payload["results"][0]["why"]
     finally:
         conn.close()
 

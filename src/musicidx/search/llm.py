@@ -1,14 +1,22 @@
-"""Optional OpenAI-backed search intent parsing."""
+"""Optional cloud LLM-backed search intent parsing."""
 
 from __future__ import annotations
 
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
-from musicidx.config import OPENAI_API_KEY_ENV_VAR, OPENAI_BASE_URL_ENV_VAR, OPENAI_MODEL_ENV_VAR
+from musicidx.config import (
+    GEMINI_API_KEY_ENV_VAR,
+    GEMINI_BASE_URL_ENV_VAR,
+    GEMINI_MODEL_ENV_VAR,
+    OPENAI_API_KEY_ENV_VAR,
+    OPENAI_BASE_URL_ENV_VAR,
+    OPENAI_MODEL_ENV_VAR,
+)
 from musicidx.search.intent import (
     CONTEXT_PRIORS,
     DEFAULT_FEATURE_RANGES,
@@ -16,12 +24,20 @@ from musicidx.search.intent import (
     LibraryProfile,
 )
 
+DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+SUPPORTED_LLM_PROVIDERS = {"gemini", "openai"}
 
 
 class LLMIntentError(RuntimeError):
     """Raised when LLM intent parsing is unavailable or invalid."""
+
+
+def is_gemini_configured() -> bool:
+    """Return True when a Gemini API key is configured."""
+    return bool(os.environ.get(GEMINI_API_KEY_ENV_VAR))
 
 
 def is_openai_configured() -> bool:
@@ -29,9 +45,99 @@ def is_openai_configured() -> bool:
     return bool(os.environ.get(OPENAI_API_KEY_ENV_VAR))
 
 
+def default_gemini_model() -> str:
+    """Return the configured Gemini model name."""
+    return os.environ.get(GEMINI_MODEL_ENV_VAR, DEFAULT_GEMINI_MODEL)
+
+
 def default_openai_model() -> str:
     """Return the configured OpenAI model name."""
     return os.environ.get(OPENAI_MODEL_ENV_VAR, DEFAULT_OPENAI_MODEL)
+
+
+def parse_intent_llm(
+    query: str,
+    library_profile: LibraryProfile,
+    *,
+    provider: str = "gemini",
+    model: str | None = None,
+    timeout_sec: float = 30.0,
+) -> IntentHints:
+    """Dispatch LLM intent parsing to a supported provider."""
+    normalized_provider = provider.strip().lower()
+    if normalized_provider == "gemini":
+        return parse_intent_gemini(
+            query,
+            library_profile,
+            model=model,
+            timeout_sec=timeout_sec,
+        )
+    if normalized_provider == "openai":
+        return parse_intent_openai(
+            query,
+            library_profile,
+            model=model,
+            timeout_sec=timeout_sec,
+        )
+    raise LLMIntentError(
+        f"unsupported LLM provider: {provider}; expected one of {sorted(SUPPORTED_LLM_PROVIDERS)}"
+    )
+
+
+def parse_intent_gemini(
+    query: str,
+    library_profile: LibraryProfile,
+    *,
+    model: str | None = None,
+    timeout_sec: float = 30.0,
+) -> IntentHints:
+    """Ask Gemini to produce structured intent hints."""
+    api_key = os.environ.get(GEMINI_API_KEY_ENV_VAR)
+    if not api_key:
+        raise LLMIntentError(f"{GEMINI_API_KEY_ENV_VAR} is not set")
+
+    selected_model = model or default_gemini_model()
+    payload = {
+        "systemInstruction": {"parts": [{"text": _system_prompt()}]},
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": json.dumps(_intent_request(query, library_profile))}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    request = urllib.request.Request(
+        _gemini_generate_content_url(selected_model, api_key),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise LLMIntentError(f"Gemini request failed: HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise LLMIntentError(f"Gemini request failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise LLMIntentError("Gemini request timed out") from exc
+
+    try:
+        data = json.loads(body)
+        parts = data["candidates"][0]["content"]["parts"]
+        content = "".join(part.get("text", "") for part in parts)
+        parsed = json.loads(content)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise LLMIntentError("Gemini returned invalid intent JSON") from exc
+
+    return intent_hints_from_json(parsed)
 
 
 def parse_intent_openai(
@@ -41,11 +147,7 @@ def parse_intent_openai(
     model: str | None = None,
     timeout_sec: float = 30.0,
 ) -> IntentHints:
-    """Ask OpenAI to produce structured intent hints.
-
-    The LLM receives only the user query and an aggregate library profile. It must not
-    recommend tracks; local ranking still happens exclusively against the SQLite DB.
-    """
+    """Ask OpenAI to produce structured intent hints."""
     api_key = os.environ.get(OPENAI_API_KEY_ENV_VAR)
     if not api_key:
         raise LLMIntentError(f"{OPENAI_API_KEY_ENV_VAR} is not set")
@@ -56,34 +158,13 @@ def parse_intent_openai(
         "temperature": 0,
         "response_format": {"type": "json_object"},
         "messages": [
-            {
-                "role": "system",
-                "content": _system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "query": query,
-                        "library_profile": library_profile.as_dict(),
-                        "allowed_contexts": sorted(CONTEXT_PRIORS.keys()),
-                        "allowed_feature_fields": sorted(DEFAULT_FEATURE_RANGES.keys()),
-                        "allowed_feature_levels": sorted(
-                            {
-                                level
-                                for ranges in DEFAULT_FEATURE_RANGES.values()
-                                for level in ranges
-                            }
-                        ),
-                    },
-                    sort_keys=True,
-                ),
-            },
+            {"role": "system", "content": _system_prompt()},
+            {"role": "user", "content": json.dumps(_intent_request(query, library_profile))},
         ],
     }
 
     request = urllib.request.Request(
-        _chat_completions_url(),
+        _openai_chat_completions_url(),
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -139,6 +220,18 @@ def intent_hints_from_json(data: dict[str, Any]) -> IntentHints:
     )
 
 
+def _intent_request(query: str, library_profile: LibraryProfile) -> dict[str, Any]:
+    return {
+        "query": query,
+        "library_profile": library_profile.as_dict(),
+        "allowed_contexts": sorted(CONTEXT_PRIORS.keys()),
+        "allowed_feature_fields": sorted(DEFAULT_FEATURE_RANGES.keys()),
+        "allowed_feature_levels": sorted(
+            {level for ranges in DEFAULT_FEATURE_RANGES.values() for level in ranges}
+        ),
+    }
+
+
 def _system_prompt() -> str:
     return """
 You are a music search intent parser.
@@ -167,7 +260,14 @@ If unsure, produce broad mood/genre concepts rather than track recommendations.
 """.strip()
 
 
-def _chat_completions_url() -> str:
+def _gemini_generate_content_url(model: str, api_key: str) -> str:
+    base_url = os.environ.get(GEMINI_BASE_URL_ENV_VAR, DEFAULT_GEMINI_BASE_URL).rstrip("/")
+    encoded_model = urllib.parse.quote(model, safe="")
+    query = urllib.parse.urlencode({"key": api_key})
+    return f"{base_url}/models/{encoded_model}:generateContent?{query}"
+
+
+def _openai_chat_completions_url() -> str:
     base_url = os.environ.get(OPENAI_BASE_URL_ENV_VAR, DEFAULT_OPENAI_BASE_URL).rstrip("/")
     return f"{base_url}/chat/completions"
 

@@ -34,6 +34,8 @@ from musicidx.config import (
     DEFAULT_MODELS_DIRNAME,
     FFPROBE_PATH_ENV_VAR,
     FPCALC_PATH_ENV_VAR,
+    GEMINI_API_KEY_ENV_VAR,
+    GEMINI_MODEL_ENV_VAR,
     MODELS_PATH_ENV_VAR,
     OPENAI_API_KEY_ENV_VAR,
     OPENAI_MODEL_ENV_VAR,
@@ -48,9 +50,10 @@ from musicidx.scanner import scan_library
 from musicidx.search.intent import build_library_profile, parse_intent_dynamic
 from musicidx.search.llm import (
     LLMIntentError,
-    default_openai_model,
+    default_gemini_model,
+    is_gemini_configured,
     is_openai_configured,
-    parse_intent_openai,
+    parse_intent_llm,
 )
 from musicidx.search.ranker import search_music
 
@@ -158,15 +161,26 @@ SearchFormatOption = Annotated[
 ]
 UseLlmOption = Annotated[
     bool,
-    typer.Option("--llm/--no-llm", help="Use OpenAI to add intent parsing hints."),
+    typer.Option("--llm/--no-llm", help="Use an LLM provider to add intent parsing hints."),
+]
+LlmProviderOption = Annotated[
+    str,
+    typer.Option("--llm-provider", help="LLM provider: gemini or openai."),
 ]
 LlmModelOption = Annotated[
     str | None,
-    typer.Option("--llm-model", help=f"OpenAI model. Defaults to {OPENAI_MODEL_ENV_VAR}."),
+    typer.Option(
+        "--llm-model",
+        help=f"LLM model. Defaults to {GEMINI_MODEL_ENV_VAR} or {OPENAI_MODEL_ENV_VAR}.",
+    ),
 ]
 LlmTimeoutOption = Annotated[
     float,
-    typer.Option("--llm-timeout", min=1.0, max=120.0, help="OpenAI timeout in seconds."),
+    typer.Option("--llm-timeout", min=1.0, max=120.0, help="LLM timeout in seconds."),
+]
+ConciseOption = Annotated[
+    bool,
+    typer.Option("--concise", help="Use shorter JSON output for search results."),
 ]
 
 
@@ -218,11 +232,18 @@ def doctor_command(json_output: JsonOption = False) -> None:
             "detail": shutil.which("ollama") or "ollama not found on PATH",
         },
         {
+            "name": "Gemini API key",
+            "status": _status(is_gemini_configured()),
+            "detail": f"configured via {GEMINI_API_KEY_ENV_VAR}"
+            if is_gemini_configured()
+            else f"missing; set {GEMINI_API_KEY_ENV_VAR} to use --llm",
+        },
+        {
             "name": "OpenAI API key",
             "status": _status(is_openai_configured()),
             "detail": f"configured via {OPENAI_API_KEY_ENV_VAR}"
             if is_openai_configured()
-            else f"missing; set {OPENAI_API_KEY_ENV_VAR} to use --llm",
+            else f"optional fallback; set {OPENAI_API_KEY_ENV_VAR}",
         },
         {
             "name": "librosa",
@@ -800,6 +821,7 @@ def parse_command(
     semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
     include_missing: IncludeMissingOption = False,
     use_llm: UseLlmOption = False,
+    llm_provider: LlmProviderOption = "gemini",
     llm_model: LlmModelOption = None,
     llm_timeout: LlmTimeoutOption = 30.0,
     json_output: JsonOption = False,
@@ -813,6 +835,7 @@ def parse_command(
             conn,
             query,
             use_llm=use_llm,
+            llm_provider=llm_provider,
             llm_model=llm_model,
             timeout_sec=llm_timeout,
             include_missing=include_missing,
@@ -847,8 +870,10 @@ def search_command(
     explain: ExplainOption = False,
     output_format: SearchFormatOption = "table",
     use_llm: UseLlmOption = False,
+    llm_provider: LlmProviderOption = "gemini",
     llm_model: LlmModelOption = None,
     llm_timeout: LlmTimeoutOption = 30.0,
+    concise: ConciseOption = False,
     json_output: JsonOption = False,
 ) -> None:
     """Search the local library with dynamic hybrid ranking."""
@@ -866,6 +891,7 @@ def search_command(
             conn,
             query,
             use_llm=use_llm,
+            llm_provider=llm_provider,
             llm_model=llm_model,
             timeout_sec=llm_timeout,
             include_missing=include_missing,
@@ -884,7 +910,7 @@ def search_command(
     finally:
         conn.close()
 
-    payload = {"db_path": str(db_path), **response.as_dict()}
+    payload = _search_payload(response, db_path=str(db_path), concise=concise)
     if output_format == "json":
         _print_json(payload)
         return
@@ -974,11 +1000,68 @@ def models_list_command(
     console.print(table)
 
 
+def _search_payload(response: Any, *, db_path: str, concise: bool) -> dict[str, Any]:
+    if not concise:
+        return {"db_path": db_path, **response.as_dict()}
+
+    intent = response.intent
+    return {
+        "db_path": db_path,
+        "query": response.query,
+        "parser": intent.parser,
+        "llm_error": intent.llm_error,
+        "llm_hints": intent.llm_hints.as_dict() if intent.llm_hints else None,
+        "intent": {
+            "limit": intent.limit,
+            "contexts": intent.contexts,
+            "prefer_tags": intent.prefer_tags,
+            "avoid_tags": intent.avoid_tags,
+            "feature_ranges": {
+                name: feature_range.as_dict()
+                for name, feature_range in intent.feature_ranges.items()
+            },
+            "semantic_model": intent.semantic_model,
+            "use_semantic": intent.use_semantic,
+        },
+        "diagnostics": response.diagnostics,
+        "results": [_concise_result(result) for result in response.results],
+    }
+
+
+def _concise_result(result: Any) -> dict[str, Any]:
+    breakdown = result.breakdown
+    return {
+        "track_id": result.track_id,
+        "path": result.path,
+        "title": result.title,
+        "artist": result.artist,
+        "album": result.album,
+        "genre": result.genre,
+        "score": result.score,
+        "why": result.explanation,
+        "scores": {
+            "semantic": round(float(breakdown.get("semantic_score", 0.0)), 6),
+            "tags": round(float(breakdown.get("tag_score", 0.0)), 6),
+            "features": round(float(breakdown.get("feature_score", 0.0)), 6),
+            "text": round(float(breakdown.get("text_score", 0.0)), 6),
+        },
+        "matched_tags": [
+            {
+                "tag": tag["tag"],
+                "score": tag["score"],
+                "source": tag["source"],
+            }
+            for tag in (breakdown.get("matched_tags") or [])[:5]
+        ],
+    }
+
+
 def _maybe_parse_with_llm(
     conn: sqlite3.Connection,
     query: str,
     *,
     use_llm: bool,
+    llm_provider: str,
     llm_model: str | None,
     timeout_sec: float,
     include_missing: bool,
@@ -987,15 +1070,17 @@ def _maybe_parse_with_llm(
         return None, "dynamic", None
     try:
         profile = build_library_profile(conn, include_missing=include_missing)
-        hints = parse_intent_openai(
+        hints = parse_intent_llm(
             query,
             profile,
-            model=llm_model or default_openai_model(),
+            provider=llm_provider,
+            model=llm_model
+            or (default_gemini_model() if llm_provider == "gemini" else None),
             timeout_sec=timeout_sec,
         )
     except LLMIntentError as exc:
         return None, "dynamic", str(exc)
-    return hints, "dynamic+openai", None
+    return hints, f"dynamic+{llm_provider}", None
 
 
 def _print_m3u(results: list[Any]) -> None:
