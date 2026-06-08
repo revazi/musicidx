@@ -1,0 +1,79 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging/build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Test/coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Linters/type checkers
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Local environment/config
+.env
+.env.*
+*.local
+
+# SQLite/local index databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Logs/runtime output
+*.log
+logs/
+
+# Generated playlists/exports
+exports/
+*.m3u
+*.m3u8
+
+# Local music/library/model scratch folders
+.musicidx-data/
+.musicidx-models/
+local-library/
+media/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Editors/IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

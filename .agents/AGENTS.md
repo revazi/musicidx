@@ -1,0 +1,371 @@
+# AGENTS.md
+
+## Project
+MusicIdx MVP
+
+## Goal
+Build a local-first CLI tool that scans a directory of music tracks, analyzes metadata and audio features, stores them in a local index database, and lets the user search the library with natural-language queries such as “chill bar music,” “shower music,” or “melancholic songs.”
+
+The CLI should be built first. A macOS app may be added later as a thin UI over the same local engine and database.
+
+## Product summary
+Build an MVP command-line app where a user can:
+- select or provide a local music directory
+- scan supported audio files
+- extract metadata such as title, artist, album, genre, duration, codec, and technical info
+- analyze basic audio features such as BPM, energy, brightness, loudness proxy, and mood-related signals
+- store all indexed information in a local SQLite database
+- search the library using regular language
+- receive ranked track recommendations with short explanations
+- export search results as playlists, especially M3U
+
+Example target commands:
+
+```bash
+musicidx init
+musicidx doctor
+musicidx scan ~/Music
+musicidx metadata
+musicidx analyze-basic
+musicidx search "Give me 10 tracks for a chill bar" --limit 10 --explain
+musicidx export "shower music" --limit 25 --out shower.m3u
+```
+
+## Current stack direction
+- Language: Python
+- CLI framework: Typer
+- Terminal output: Rich
+- Database: SQLite
+- Full-text search: SQLite FTS5
+- Metadata extraction: ffprobe JSON output first
+- Audio analysis: librosa first
+- Optional music tagging later: Essentia models
+- Optional local LLM intent parsing later: Ollama or llama.cpp
+- Optional embeddings later: sentence-transformers, then SQLite vector search only if needed
+- Future macOS app: SwiftUI wrapper over the CLI/helper engine
+
+## Core engineering principles
+- Keep the MVP simple
+- Prefer boring, maintainable solutions
+- Make the smallest useful change possible
+- Build the CLI before any macOS UI
+- Prefer synchronous request/response flows first
+- Avoid background systems until they are explicitly requested
+- Keep dependencies minimal
+- Keep indexing and search behavior transparent and debuggable
+- Prefer deterministic parsing and scoring before adding LLM behavior
+- Optimize for readability and iteration speed
+- Treat every feature as local-first by default
+
+## Working rules
+- Only do the task that was requested
+- Before coding, provide a short plan
+- After completing the requested task, stop
+- No file changes without explicit confirmation
+- Do not jump ahead to later phases
+- Do not add unrelated improvements
+- Do not perform broad refactors unless explicitly asked
+- If something is ambiguous, choose the simplest sensible option and state it clearly
+- Keep the implementation aligned with the current phase
+- Do not introduce new services, daemons, workers, or UI layers unless requested
+- Do not add heavyweight ML models unless the task explicitly asks for them
+
+## Architecture constraints
+- Local-first only
+- No cloud indexing
+- No remote audio upload
+- No user account system
+- No web app unless explicitly requested
+- No macOS app code until explicitly requested
+- No Celery
+- No Redis
+- No Docker unless explicitly requested
+- No Kubernetes
+- No microservices
+- No event-driven architecture
+- No background worker system unless explicitly requested
+- No external hosted database
+- No mandatory external LLM API
+- No telemetry unless explicitly requested
+
+## CLI conventions
+- Expose commands through a single `musicidx` CLI
+- Use Typer for command definitions
+- Use Rich for readable terminal output
+- Support `--json` output for commands that may later be called by a macOS app
+- Keep commands predictable and composable
+- Prefer explicit command names over clever shortcuts
+- Commands should fail gracefully with clear error messages
+- Long-running commands should show progress where practical
+- Do not crash the whole process because one audio file is corrupt or unsupported
+
+## Expected core commands
+Start with only the commands required by the current task or phase.
+
+Likely command progression:
+
+```bash
+musicidx --help
+musicidx doctor
+musicidx init
+musicidx db-info
+musicidx scan <directory>
+musicidx metadata
+musicidx search-text <query>
+musicidx analyze-basic
+musicidx parse <query>
+musicidx search <query>
+musicidx export <query>
+```
+
+Do not implement commands from later phases unless explicitly asked.
+
+## Backend/module conventions
+- Keep code under `src/musicidx/`
+- Keep modules simple and practical
+- Prefer straightforward functions and small service modules
+- Avoid plugin-style internal architectures
+- Avoid premature abstractions
+- Prefer explicit code over clever code
+- Keep database access understandable
+- Keep scoring logic separate from CLI command handlers
+- Keep analysis logic separate from database persistence
+- Use Pydantic models where validation meaningfully improves clarity
+- Add tests for behavior that can regress easily
+
+Suggested project structure:
+
+```text
+musicidx/
+  pyproject.toml
+  README.md
+  AGENTS.md
+  src/musicidx/
+    __init__.py
+    cli.py
+    config.py
+    db.py
+    migrations.py
+    scanner.py
+    metadata.py
+    fingerprint.py
+    analyzer/
+      __init__.py
+      basic_features.py
+      embeddings.py
+      essentia_models.py
+    search/
+      __init__.py
+      intent.py
+      llm.py
+      ranker.py
+      explain.py
+    export.py
+    models.py
+    logging.py
+  tests/
+    test_db.py
+    test_scanner.py
+    test_metadata.py
+    test_intent.py
+    test_ranker.py
+```
+
+Only create directories and files needed for the current task.
+
+## Database conventions
+- Use SQLite as the local source of truth
+- Store the default database under the user’s application support/config area
+- Keep migrations simple and idempotent
+- Enable foreign keys
+- Prefer WAL mode for the local index database
+- Do not delete missing files immediately; mark them as missing
+- Keep schema changes explicit
+- Avoid complex ORM layers unless explicitly requested
+- Use SQLite FTS5 for text search
+- Do not add vector search infrastructure until embeddings are actually implemented
+
+Default database location for macOS-oriented development:
+
+```text
+~/Library/Application Support/MusicIdx/index.sqlite
+```
+
+A configurable database path is acceptable for development and tests.
+
+## Audio file support
+Supported extensions for scanning:
+
+```text
+.mp3
+.flac
+.m4a
+.aac
+.wav
+.aiff
+.aif
+.ogg
+.opus
+.alac
+.wv
+```
+
+Scanning should be idempotent. Re-running a scan over the same unchanged directory must not create duplicate tracks.
+
+## Metadata implementation guidance
+- Use `ffprobe` JSON output first
+- Keep metadata extraction replaceable but do not over-abstract it
+- Normalize common tag aliases
+- Store useful technical info such as codec, sample rate, bit rate, channels, and duration
+- Generate a simple text profile for each track after metadata extraction
+- Keep profile generation deterministic and inspectable
+
+Common metadata fields:
+
+```text
+title
+artist
+album
+album_artist
+genre
+date/year
+track_number
+disc_number
+duration_sec
+codec
+sample_rate
+bit_rate
+channels
+```
+
+## Audio analysis guidance
+- Start with basic deterministic audio features
+- Use `librosa` first
+- Analyze in mono with a consistent sample rate
+- Add a quick mode before optimizing for full-library accuracy
+- Store raw features and normalized derived values where useful
+- Make analysis resumable by skipping already-analyzed tracks with the current analysis version
+- Corrupt files should be recorded as analysis failures and skipped
+
+Initial useful features:
+
+```text
+BPM / tempo
+RMS energy
+spectral centroid
+spectral flatness
+spectral rolloff
+zero crossing rate
+MFCC mean/std
+chroma profile
+rough key/mode estimate
+brightness proxy
+aggression proxy
+danceability proxy
+```
+
+## AI / search implementation guidance
+- Keep first versions heuristic and easy to inspect
+- Prefer deterministic intent parsing before adding LLM-backed parsing
+- Add LLM-backed features only when needed for a concrete user flow
+- The LLM should parse user intent, not invent track recommendations
+- The ranking system must only return tracks that exist in the local database
+- Keep scoring logic transparent and debuggable
+- Separate query parsing, retrieval, scoring, and explanation logic
+- Validate all LLM output with a strict schema
+- Always provide a non-LLM fallback
+
+Natural-language queries should be converted into structured intent such as:
+
+```json
+{
+  "limit": 10,
+  "context": "chill_bar",
+  "energy": [0.25, 0.6],
+  "valence": [0.35, 0.8],
+  "tempo_bpm": [70, 115],
+  "prefer_tags": ["chill", "lounge", "warm", "downtempo"],
+  "avoid_tags": ["aggressive", "chaotic", "very loud"],
+  "diversity": {
+    "max_tracks_per_artist": 2
+  }
+}
+```
+
+## Ranking guidance
+Use a simple, inspectable hybrid ranking system.
+
+Candidate sources may include:
+- metadata/full-text search
+- generated track profile text
+- audio feature ranges
+- tag matches
+- optional semantic embeddings later
+- optional user feedback later
+
+Initial scoring can combine:
+
+```text
+semantic/profile match
+feature fit
+mood/tag fit
+metadata text match
+diversity penalty
+```
+
+Keep ranking weights configurable or easy to adjust. Do not hardcode subjective assumptions in too many places.
+
+## Playlist/export guidance
+- M3U export is the first priority
+- JSON output is useful for the future macOS app
+- CSV export can be added when requested
+- Do not build full playlist management until requested
+
+## macOS app guidance
+- Do not implement the macOS app during the CLI MVP unless explicitly requested
+- Design CLI JSON output so a future app can call it
+- Keep the engine independent from terminal formatting
+- The future SwiftUI app should be a thin layer over the same database and engine
+- Do not introduce AppKit/SwiftUI code into the Python CLI project prematurely
+
+## Privacy and local-first rules
+- Do not upload audio files anywhere
+- Do not send track metadata to remote APIs unless explicitly requested
+- Do not require hosted LLM APIs
+- Do not add telemetry or analytics unless explicitly requested
+- Any optional model download behavior must be explicit
+- Keep user library paths local and private
+
+## File and project hygiene
+- Add only the files needed for the current task
+- Keep naming clear and predictable
+- Update docs when the task changes public behavior or setup
+- Avoid dead code, placeholder abstractions, and speculative structure
+- Avoid adding dependencies that are not used by the current task
+- Keep tests focused on the behavior being implemented
+- Prefer small commits/changesets organized around one task
+
+## Expected output for each task
+Return:
+1. Plan
+2. Changes made
+3. Files created/edited
+4. Commands to run
+5. Verification steps
+6. Decisions/tradeoffs
+
+## Non-goals for now
+- macOS UI before the CLI works
+- cloud sync
+- streaming service integrations
+- user accounts
+- social features
+- recommendation feeds
+- enterprise-grade infrastructure
+- advanced async processing
+- multi-tenant architecture
+- plugin frameworks
+- deep analytics
+- production-grade scaling work before the MVP exists
+- direct audio-to-text embedding models before basic search quality is proven
+- commercial model packaging before licenses are reviewed
