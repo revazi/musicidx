@@ -79,6 +79,8 @@ type SearchPayload = {
   results?: SearchResult[];
 };
 
+type ThemeMode = "system" | "light" | "dark";
+
 type SettingsState = {
   cwd: string;
   cliPath: string;
@@ -92,6 +94,7 @@ type SettingsState = {
   musicFolder: string;
   semanticModel: string;
   exportPath: string;
+  themeMode: ThemeMode;
 };
 
 type IndexStep = {
@@ -116,11 +119,15 @@ const defaultSettings: SettingsState = {
   musicFolder: "",
   semanticModel: DEFAULT_SEMANTIC_MODEL,
   exportPath: "",
+  themeMode: "system",
 };
 
 export default function App() {
   const [view, setView] = useState<"main" | "settings">("main");
   const [settings, setSettings] = useState<SettingsState>(defaultSettings);
+  const [systemTheme, setSystemTheme] = useState<"light" | "dark">(() =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+  );
   const [query, setQuery] = useState("chill bar");
   const [limit, setLimit] = useState(10);
   const [useLlm, setUseLlm] = useState(false);
@@ -161,10 +168,28 @@ export default function App() {
   );
 
   const pipelinePercent = Math.round((pipelineCompleted / indexSteps.length) * 100);
+  const effectiveTheme = settings.themeMode === "system" ? systemTheme : settings.themeMode;
 
   useEffect(() => {
     void initializeDesktopState();
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemTheme(media.matches ? "dark" : "light");
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", effectiveTheme === "dark");
+    document.documentElement.classList.toggle("light", effectiveTheme === "light");
+    document.documentElement.style.colorScheme = effectiveTheme;
+    void invoke("set_window_theme", {
+      theme: settings.themeMode === "system" ? "system" : effectiveTheme,
+    }).catch(() => undefined);
+  }, [effectiveTheme, settings.themeMode]);
 
   async function initializeDesktopState() {
     try {
@@ -528,6 +553,22 @@ export default function App() {
             </section>
 
             <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Theme">
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={settings.themeMode}
+                  onChange={(event) =>
+                    updateSettings({ themeMode: event.target.value as ThemeMode })
+                  }
+                >
+                  <option value="system">System ({systemTheme})</option>
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                </select>
+              </Field>
+              <div className="rounded-lg border bg-muted p-3 text-sm text-muted-foreground">
+                Native window theme follows this setting where supported.
+              </div>
               <Field label="Working directory" className="md:col-span-2">
                 <PathInput
                   value={settings.cwd}
@@ -789,7 +830,7 @@ function Shell({
   onSettings: () => void;
 }) {
   return (
-    <div className="dark min-h-screen bg-background text-foreground [background:radial-gradient(circle_at_20%_0%,rgba(168,85,247,0.18),transparent_28rem),radial-gradient(circle_at_90%_10%,rgba(217,70,239,0.10),transparent_24rem),hsl(var(--background))]">
+    <div className="min-h-screen bg-background text-foreground [background:radial-gradient(circle_at_20%_0%,rgba(168,85,247,0.16),transparent_28rem),radial-gradient(circle_at_90%_10%,rgba(217,70,239,0.08),transparent_24rem),hsl(var(--background))]">
       <div className="mx-auto grid w-full max-w-6xl gap-4 px-4 py-4 sm:px-6 lg:px-8">
         <header className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-sm md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">

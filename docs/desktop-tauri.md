@@ -72,6 +72,7 @@ The Tauri UI can:
 
 - run `doctor --json`
 - use a minimal React + Tailwind + local shadcn-style component UI with subtle purple accents
+- support System, Dark, and Light themes from Settings; System follows OS preference
 - show DB info from advanced indexing actions
 - use a separate settings page opened from the header gear icon
 - keep semantic/embedding model configuration on the settings page

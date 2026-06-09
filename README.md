@@ -128,7 +128,7 @@ musicidx doctor --json
 
 ## Desktop UI scaffold
 
-An early Tauri desktop wrapper lives in `desktop/`. It calls the existing local `musicidx` CLI instead of reimplementing indexing/search. It uses a minimal React/Tailwind shadcn-style UI with subtle purple accents, native folder/file pickers, floating indexing/export actions, progress, advanced indexing actions in Settings, streamed command output, collapsible search result cards, feedback buttons, eval, and M3U export.
+An early Tauri desktop wrapper lives in `desktop/`. It calls the existing local `musicidx` CLI instead of reimplementing indexing/search. It uses a minimal React/Tailwind shadcn-style UI with subtle purple accents, System/Dark/Light themes, native folder/file pickers, floating indexing/export actions, progress, advanced indexing actions in Settings, streamed command output, collapsible search result cards, feedback buttons, eval, and M3U export.
 
 ```bash
 cd desktop

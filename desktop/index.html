@@ -3,6 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        try {
+          const raw = localStorage.getItem("musicidx.desktop.settings.v2");
+          const parsed = raw ? JSON.parse(raw) : {};
+          const mode = parsed.themeMode || "system";
+          const dark =
+            mode === "dark" ||
+            (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.classList.toggle("light", !dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch {
+          const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.classList.toggle("light", !dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        }
+      })();
+    </script>
     <title>MusicIdx</title>
   </head>
   <body>

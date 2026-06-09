@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, Theme};
 
 #[derive(Serialize)]
 struct DesktopState {
@@ -42,6 +42,22 @@ fn desktop_state() -> DesktopState {
         cli_path: musicidx_cli_path(),
         prefix_args: musicidx_prefix_args().join(" "),
     }
+}
+
+#[tauri::command]
+fn set_window_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let requested_theme = match theme.trim().to_lowercase().as_str() {
+        "dark" => Some(Theme::Dark),
+        "light" => Some(Theme::Light),
+        "system" | "" => None,
+        other => return Err(format!("unsupported theme: {other}")),
+    };
+    window
+        .set_theme(requested_theme)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -313,6 +329,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             desktop_state,
+            set_window_theme,
             run_musicidx,
             run_musicidx_stream
         ])
