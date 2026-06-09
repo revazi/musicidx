@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from musicidx.cli import _search_payload
+from typer.testing import CliRunner
+
+from musicidx.cli import _search_payload, app
 from musicidx.db import connect_db, init_db
 from musicidx.search.intent import parse_intent_dynamic
 from musicidx.search.ranker import search_music
@@ -87,6 +89,52 @@ def test_search_music_ranks_library_aware_chill_match_first(tmp_path):
         assert payload["results"][0]["why"]
     finally:
         conn.close()
+
+
+def test_export_command_writes_m3u_playlist(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        track_path = tmp_path / "chill.mp3"
+        _insert_track(
+            conn,
+            "chill-track",
+            track_path,
+            title="Calm Room",
+            artist="Artist A",
+            profile_text="relaxing ambient background downtempo",
+            tags=[("essentia:mood", "relaxing", 0.9)],
+            energy=0.30,
+            aggression=0.10,
+            danceability=0.50,
+            bpm=90.0,
+        )
+    finally:
+        conn.close()
+
+    out = tmp_path / "exports" / "chill.m3u"
+    result = CliRunner().invoke(
+        app,
+        [
+            "export",
+            "chill bar",
+            "--db",
+            str(db_path),
+            "--out",
+            str(out),
+            "--limit",
+            "1",
+            "--absolute-paths",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    content = out.read_text()
+    assert content.startswith("#EXTM3U")
+    assert "#EXTINF:-1,Artist A - Calm Room" in content
+    assert str(track_path.resolve()) in content
 
 
 def _insert_track(

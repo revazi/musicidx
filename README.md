@@ -14,13 +14,13 @@ Implemented so far:
 - Optional local Essentia ML mood/genre tagging
 - Optional semantic embeddings over enriched track profiles
 - Dynamic library-aware natural-language parsing and hybrid search
-- Optional OpenAI intent parsing hints with local DB-only ranking
+- Optional Gemini/OpenAI intent parsing hints with local DB-only ranking
+- M3U/JSON/CSV playlist-style search export
 
 Not implemented yet:
 
-- Playlist export
 - Feedback/evaluation loop
-- macOS UI
+- Cross-platform desktop UI
 
 ## Local-first behavior
 
@@ -54,18 +54,28 @@ musicidx analyze-tags --models-path /path/to/models
 
 ## Installation
 
-System tools for full local analysis on macOS:
+System tools for full local analysis:
+
+macOS:
 
 ```bash
 brew install ffmpeg chromaprint
 ```
 
-This provides:
+Windows:
+
+```powershell
+# Install FFmpeg and Chromaprint/fpcalc, then ensure both are on PATH.
+where ffprobe
+where fpcalc
+```
+
+These provide:
 
 - `ffprobe` for metadata/technical audio extraction
 - `fpcalc` for Chromaprint fingerprinting
 
-Verify:
+Verify on macOS/Linux:
 
 ```bash
 which ffprobe
@@ -195,11 +205,7 @@ After fingerprinting or full hashes, `musicidx duplicates` can report likely mov
 
 ### Extract metadata
 
-Requires `ffprobe` from FFmpeg for real files. On macOS:
-
-```bash
-brew install ffmpeg
-```
+Requires `ffprobe` from FFmpeg for real files. On macOS use `brew install ffmpeg`; on Windows install FFmpeg and ensure `ffprobe` is on `PATH`.
 
 If needed, override the binary path:
 
@@ -241,11 +247,7 @@ This uses SQLite FTS5 over metadata and generated profile text.
 
 ### Fingerprint tracks
 
-Requires `fpcalc` from Chromaprint for real files. On macOS:
-
-```bash
-brew install chromaprint
-```
+Requires `fpcalc` from Chromaprint for real files. On macOS use `brew install chromaprint`; on Windows install Chromaprint/fpcalc and ensure `fpcalc` is on `PATH`.
 
 If needed, override the binary path:
 
@@ -546,6 +548,28 @@ Example stored ML tag from a local test run:
 }
 ```
 
+## Playlist/export workflow
+
+You can export ranked search results directly:
+
+```bash
+musicidx search "ambient background" --format m3u > ambient.m3u
+musicidx export "chill bar" --limit 25 --out chill-bar.m3u
+musicidx export "chill bar" --format json --out chill-bar.json
+musicidx export "chill bar" --format csv --out chill-bar.csv
+```
+
+Path options:
+
+```bash
+musicidx export "chill bar" --out chill-bar.m3u --absolute-paths
+musicidx export "chill bar" --out chill-bar.m3u --relative-paths
+```
+
+The dedicated `export` command uses the same local parser/ranker as `search`, and supports Gemini/OpenAI intent hints with `--llm`.
+
+For future desktop-wrapper integration notes, see `docs/ui-json-contracts.md`. A starter search-quality query set lives in `eval/search_queries.json`.
+
 ## JSON output
 
 Commands intended for automation support `--json`, including:
@@ -570,8 +594,184 @@ musicidx search "chill bar" --json
 musicidx search "chill bar" --json --concise
 musicidx search "chill bar" --llm --json
 musicidx search "chill bar" --llm --json --concise
+musicidx export "chill bar" --json
 musicidx models list --json
 ```
+
+## CLI flag reference
+
+### Global patterns
+
+Most data-producing commands support:
+
+| Flag | Meaning |
+| --- | --- |
+| `--db PATH` | Use a specific SQLite database instead of `./musicidx.sqlite` or `MUSICIDX_DB_PATH`. |
+| `--json` | Print machine-readable JSON. |
+
+### `musicidx scan <directory>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--full-hash` | Compute SHA-256 content hashes while scanning. Slower, but useful for exact duplicate/move detection. |
+| `--follow-symlinks` | Follow symlinked directories/files while scanning. |
+| `--dry-run` | Show scan counts without writing DB changes. |
+| `--json` | Print scan summary as JSON. |
+
+### `musicidx metadata`
+
+| Flag | Meaning |
+| --- | --- |
+| `--track-id ID` | Extract metadata for one track only. |
+| `--missing-only` | Process only tracks missing metadata/profile data. |
+| `--json` | Print summary as JSON. |
+
+### `musicidx search-text <query>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--limit N` | Limit number of FTS results. |
+| `--include-missing` | Include tracks marked missing from disk. |
+| `--json` | Print search results as JSON. |
+
+### `musicidx fingerprint`
+
+| Flag | Meaning |
+| --- | --- |
+| `--track-id ID` | Fingerprint one track only. |
+| `--missing-only` | Process only tracks without stored fingerprints. |
+| `--json` | Print summary as JSON. |
+
+### `musicidx duplicates`
+
+| Flag | Meaning |
+| --- | --- |
+| `--include-missing / --exclude-missing` | Include/exclude missing tracks. Including missing tracks helps detect moved-file candidates. |
+| `--duration-tolerance SECONDS` | Duration tolerance for grouping possible duplicates. Default: `3.0`. |
+| `--json` | Print duplicate groups as JSON. |
+
+### `musicidx analyze-basic`
+
+| Flag | Meaning |
+| --- | --- |
+| `--track-id ID` | Analyze one track only. |
+| `--quick` | Analyze only the first 120 seconds. |
+| `--workers N` | Number of analysis worker threads. |
+| `--json` | Print summary as JSON. |
+
+### `musicidx analyze-tags`
+
+| Flag | Meaning |
+| --- | --- |
+| `--models-path PATH` | Use a specific local Essentia model directory. |
+| `--track-id ID` | Analyze ML tags for one track only. |
+| `--missing-only` | Process only tracks without stored Essentia tags. |
+| `--min-score FLOAT` | Runtime minimum tag score. Manifest model `min_score` may also apply. Use `0.0` for best guesses. |
+| `--workers N` | Number of tag-analysis worker threads. |
+| `--json` | Print summary as JSON. |
+
+### `musicidx tags --track-id <id>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--track-id ID` | Required track ID to inspect. |
+| `--json` | Print stored tags as JSON. |
+
+### `musicidx embed`
+
+| Flag | Meaning |
+| --- | --- |
+| `--track-id ID` | Embed one track profile only. |
+| `--model NAME_OR_PATH` | Sentence-transformers model name or local path. Example: `.musicidx-models/all-MiniLM-L6-v2`. |
+| `--batch-size N` | Embedding batch size. |
+| `--refresh` | Recompute even when stored embedding text is current. |
+| `--json` | Print summary as JSON. |
+
+### `musicidx search-semantic <query>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--model NAME_OR_PATH` | Embedding model name/path matching stored embeddings. |
+| `--limit N` | Limit number of semantic results. |
+| `--include-missing` | Include tracks marked missing from disk. |
+| `--json` | Print results as JSON. |
+
+### `musicidx parse <query>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--limit N` | Override parsed result limit. |
+| `--semantic-model NAME_OR_PATH` | Embedding model name/path to consider when checking semantic availability. |
+| `--include-missing` | Build intent while including missing tracks in library statistics. |
+| `--llm / --no-llm` | Enable/disable LLM intent hints. Default: disabled. |
+| `--llm-provider PROVIDER` | LLM provider. Supported: `gemini`, `openai`. Default: `gemini`. |
+| `--llm-model MODEL` | Provider model override. Gemini default comes from `MUSICIDX_GEMINI_MODEL`. |
+| `--llm-timeout SECONDS` | LLM request timeout. |
+| `--json` | Print parsed intent as JSON. |
+
+### `musicidx search <query>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--limit N` | Limit number of returned tracks, 1–100. |
+| `--semantic-model NAME_OR_PATH` | Embedding model name/path to use if matching embeddings exist. |
+| `--include-missing` | Include tracks marked missing from disk. Default: false. |
+| `--explain` | Include human-readable explanation lines per result. |
+| `--format table/json/m3u` | Output as Rich table, JSON, or M3U playlist. Default: `table`. |
+| `--concise` | Shorter JSON output. Omits full library profile and verbose breakdowns. Useful with `--format json` or `--json`. |
+| `--llm / --no-llm` | Enable/disable LLM intent hints. Default: disabled. |
+| `--llm-provider PROVIDER` | LLM provider. Supported: `gemini`, `openai`. Default: `gemini`. |
+| `--llm-model MODEL` | Provider model override. |
+| `--llm-timeout SECONDS` | LLM request timeout. |
+| `--json` | Shortcut for `--format json`. Can be combined with `--concise`. |
+
+Examples:
+
+```bash
+musicidx search "chill bar" --limit 5 --explain
+musicidx search "shower music" --format json --concise
+musicidx search "focus music" --llm --llm-provider gemini --limit 10 --explain
+musicidx search "ambient background" --format m3u > ambient.m3u
+```
+
+### `musicidx export <query>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--out PATH`, `-o PATH` | Write export output to a file instead of stdout. |
+| `--limit N` | Limit number of exported tracks, 1–100. |
+| `--semantic-model NAME_OR_PATH` | Embedding model name/path to use if matching embeddings exist. |
+| `--include-missing` | Include tracks marked missing from disk. Default: false. |
+| `--format m3u/json/csv` | Export format. Default: `m3u`. |
+| `--absolute-paths` | Export absolute track paths. |
+| `--relative-paths` | Export paths relative to the output file or cwd. |
+| `--llm / --no-llm` | Enable/disable LLM intent hints. Default: disabled. |
+| `--llm-provider PROVIDER` | LLM provider. Supported: `gemini`, `openai`. Default: `gemini`. |
+| `--llm-model MODEL` | Provider model override. |
+| `--llm-timeout SECONDS` | LLM request timeout. |
+| `--json` | Shortcut for `--format json`. |
+
+Examples:
+
+```bash
+musicidx export "chill bar" --limit 25 --out chill-bar.m3u
+musicidx export "chill bar" --format csv --out chill-bar.csv --absolute-paths
+musicidx export "focus music" --llm --format json --out focus.json
+```
+
+### `musicidx models path`
+
+| Flag | Meaning |
+| --- | --- |
+| `--models-path PATH` | Show an explicit model path instead of the default. |
+| `--json` | Print paths as JSON. |
+
+### `musicidx models list`
+
+| Flag | Meaning |
+| --- | --- |
+| `--models-path PATH` | List models from a specific local model directory. |
+| `--json` | Print model status as JSON. |
 
 ## Development checks
 

@@ -6,7 +6,7 @@ MusicIdx MVP
 ## Goal
 Build a local-first CLI tool that scans a directory of music tracks, analyzes metadata and audio features, stores them in a local index database, and lets the user search the library with natural-language queries such as “chill bar music,” “shower music,” or “melancholic songs.”
 
-The CLI should be built first. A macOS app may be added later as a thin UI over the same local engine and database.
+The CLI should be built first. A cross-platform desktop app may be added later as a thin UI over the same local engine and database.
 
 ## Product summary
 Build an MVP command-line app where a user can:
@@ -42,13 +42,13 @@ musicidx export "shower music" --limit 25 --out shower.m3u
 - Optional music tagging later: Essentia models
 - Optional local LLM intent parsing later: Ollama or llama.cpp
 - Optional embeddings later: sentence-transformers, then SQLite vector search only if needed
-- Future macOS app: SwiftUI wrapper over the CLI/helper engine
+- Future desktop app: cross-platform wrapper, likely Tauri/Electron/PySide6, over the CLI/helper engine
 
 ## Core engineering principles
 - Keep the MVP simple
 - Prefer boring, maintainable solutions
 - Make the smallest useful change possible
-- Build the CLI before any macOS UI
+- Build the CLI before any desktop UI
 - Prefer synchronous request/response flows first
 - Avoid background systems until they are explicitly requested
 - Keep dependencies minimal
@@ -76,7 +76,7 @@ musicidx export "shower music" --limit 25 --out shower.m3u
 - No remote audio upload
 - No user account system
 - No web app unless explicitly requested
-- No macOS app code until explicitly requested
+- No desktop app code until explicitly requested
 - No Celery
 - No Redis
 - No Docker unless explicitly requested
@@ -92,7 +92,7 @@ musicidx export "shower music" --limit 25 --out shower.m3u
 - Expose commands through a single `musicidx` CLI
 - Use Typer for command definitions
 - Use Rich for readable terminal output
-- Support `--json` output for commands that may later be called by a macOS app
+- Support `--json` output for commands that may later be called by a desktop app
 - Keep commands predictable and composable
 - Prefer explicit command names over clever shortcuts
 - Commands should fail gracefully with clear error messages
@@ -185,7 +185,7 @@ Only create directories and files needed for the current task.
 - Use SQLite FTS5 for text search
 - Do not add vector search infrastructure until embeddings are actually implemented
 
-Default database location for macOS-oriented development:
+Default database location for packaged desktop-app development:
 
 ```text
 ~/Library/Application Support/MusicIdx/index.sqlite
@@ -317,16 +317,17 @@ Keep ranking weights configurable or easy to adjust. Do not hardcode subjective 
 
 ## Playlist/export guidance
 - M3U export is the first priority
-- JSON output is useful for the future macOS app
+- JSON output is useful for the future desktop app
 - CSV export can be added when requested
 - Do not build full playlist management until requested
 
-## macOS app guidance
-- Do not implement the macOS app during the CLI MVP unless explicitly requested
+## Desktop app guidance
+- Do not implement the desktop app during the CLI MVP unless explicitly requested
 - Design CLI JSON output so a future app can call it
 - Keep the engine independent from terminal formatting
-- The future SwiftUI app should be a thin layer over the same database and engine
-- Do not introduce AppKit/SwiftUI code into the Python CLI project prematurely
+- The future cross-platform app should be a thin layer over the same database and engine
+- Prefer a wrapper such as Tauri, Electron, or PySide6/Qt when the UI phase begins
+- Do not introduce desktop UI framework code into the Python CLI project prematurely
 
 ## Privacy and local-first rules
 - Do not upload audio files anywhere
@@ -355,7 +356,7 @@ Return:
 6. Decisions/tradeoffs
 
 ## Non-goals for now
-- macOS UI before the CLI works
+- desktop UI before the CLI works
 - cloud sync
 - streaming service integrations
 - user accounts

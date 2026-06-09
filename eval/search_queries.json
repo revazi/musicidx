@@ -1,0 +1,47 @@
+{
+  "description": "Starter subjective search-quality eval set for MusicIdx. Use this after indexing a representative local library.",
+  "queries": [
+    {
+      "id": "chill_bar",
+      "text": "Give me 10 tracks for a chill bar",
+      "expected_tags": ["chill", "relaxed", "downtempo", "lounge", "warm"],
+      "avoid_tags": ["aggressive", "metal", "chaotic", "hardcore"]
+    },
+    {
+      "id": "shower_music",
+      "text": "Shower music",
+      "expected_tags": ["upbeat", "energetic", "happy", "singalong", "pop"],
+      "avoid_tags": ["drone", "sleep", "very quiet", "ambient"]
+    },
+    {
+      "id": "focus_coding_ambient",
+      "text": "Focus coding ambient background music",
+      "expected_tags": ["ambient", "instrumental", "calm", "background", "minimal"],
+      "avoid_tags": ["aggressive", "screaming", "chaotic", "party"]
+    },
+    {
+      "id": "sad_reflective",
+      "text": "sad reflective melancholic songs",
+      "expected_tags": ["sad", "melancholic", "reflective", "soft", "introspective"],
+      "avoid_tags": ["party", "happy", "aggressive", "workout"]
+    },
+    {
+      "id": "party_electronic",
+      "text": "party electronic tracks",
+      "expected_tags": ["electronic", "dance", "energetic", "party", "club"],
+      "avoid_tags": ["sleep", "sad", "drone", "very quiet"]
+    },
+    {
+      "id": "aggressive_workout",
+      "text": "aggressive workout music",
+      "expected_tags": ["aggressive", "energetic", "intense", "workout", "fast"],
+      "avoid_tags": ["sleep", "ambient", "soft", "calm"]
+    },
+    {
+      "id": "sleepy_calm",
+      "text": "sleepy calm music",
+      "expected_tags": ["sleep", "calm", "quiet", "ambient", "relaxing"],
+      "avoid_tags": ["aggressive", "party", "workout", "chaotic"]
+    }
+  ]
+}

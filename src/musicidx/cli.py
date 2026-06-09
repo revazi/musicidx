@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -181,6 +184,22 @@ LlmTimeoutOption = Annotated[
 ConciseOption = Annotated[
     bool,
     typer.Option("--concise", help="Use shorter JSON output for search results."),
+]
+ExportFormatOption = Annotated[
+    str,
+    typer.Option("--format", help="Export format: m3u, json, or csv."),
+]
+OutputPathOption = Annotated[
+    Path | None,
+    typer.Option("--out", "-o", help="Write export output to a file instead of stdout."),
+]
+AbsolutePathsOption = Annotated[
+    bool,
+    typer.Option("--absolute-paths", help="Export absolute track paths."),
+]
+RelativePathsOption = Annotated[
+    bool,
+    typer.Option("--relative-paths", help="Export paths relative to the output file or cwd."),
 ]
 
 
@@ -937,6 +956,74 @@ def search_command(
     console.print(table)
 
 
+@app.command("export")
+def export_command(
+    query: SearchQueryArg,
+    db: DbOption = None,
+    out: OutputPathOption = None,
+    limit: OptionalLimitOption = None,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    include_missing: IncludeMissingOption = False,
+    output_format: ExportFormatOption = "m3u",
+    use_llm: UseLlmOption = False,
+    llm_provider: LlmProviderOption = "gemini",
+    llm_model: LlmModelOption = None,
+    llm_timeout: LlmTimeoutOption = 30.0,
+    absolute_paths: AbsolutePathsOption = False,
+    relative_paths: RelativePathsOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Export a search result set as M3U, JSON, or CSV."""
+    if json_output:
+        output_format = "json"
+    if output_format not in {"m3u", "json", "csv"}:
+        console.print("[red]Error:[/red] --format must be one of: m3u, json, csv")
+        raise typer.Exit(1)
+    if absolute_paths and relative_paths:
+        console.print("[red]Error:[/red] choose only one of --absolute-paths or --relative-paths")
+        raise typer.Exit(1)
+
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        llm_hints, parser, llm_error = _maybe_parse_with_llm(
+            conn,
+            query,
+            use_llm=use_llm,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            timeout_sec=llm_timeout,
+            include_missing=include_missing,
+        )
+        response = search_music(
+            conn,
+            query,
+            limit=limit,
+            include_missing=include_missing,
+            semantic_model=semantic_model,
+            explain=True,
+            llm_hints=llm_hints,
+            parser=parser,
+            llm_error=llm_error,
+        )
+    finally:
+        conn.close()
+
+    path_mode = _export_path_mode(absolute_paths=absolute_paths, relative_paths=relative_paths)
+    base_dir = out.parent if out else Path.cwd()
+    content = _format_export(
+        response,
+        db_path=str(db_path),
+        output_format=output_format,
+        path_mode=path_mode,
+        base_dir=base_dir,
+    )
+    _write_or_print(out, content)
+    if out is not None:
+        console.print(f"[green]Wrote {output_format.upper()} export:[/green] {out}")
+
+
 @models_app.command("path")
 def models_path_command(
     models_path: ModelsPathOption = None,
@@ -998,6 +1085,61 @@ def models_list_command(
             ", ".join(model["missing_files"]),
         )
     console.print(table)
+
+
+def _export_path_mode(*, absolute_paths: bool, relative_paths: bool) -> str:
+    if absolute_paths:
+        return "absolute"
+    if relative_paths:
+        return "relative"
+    return "stored"
+
+
+def _format_export(
+    response: Any,
+    *,
+    db_path: str,
+    output_format: str,
+    path_mode: str,
+    base_dir: Path,
+) -> str:
+    if output_format == "m3u":
+        return _m3u_text(response.results, path_mode=path_mode, base_dir=base_dir)
+    if output_format == "csv":
+        return _csv_text(response.results, path_mode=path_mode, base_dir=base_dir)
+    if output_format == "json":
+        payload = _search_payload(response, db_path=db_path, concise=True)
+        payload["export"] = {"format": "json", "path_mode": path_mode}
+        for result in payload["results"]:
+            original_path = result["path"]
+            result["original_path"] = original_path
+            result["path"] = _export_result_path(
+                original_path,
+                path_mode=path_mode,
+                base_dir=base_dir,
+            )
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    raise ValueError(f"unsupported export format: {output_format}")
+
+
+def _write_or_print(out: Path | None, content: str) -> None:
+    if out is None:
+        print(content, end="")
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(content, encoding="utf-8")
+
+
+def _export_result_path(path: str, *, path_mode: str, base_dir: Path) -> str:
+    track_path = Path(path).expanduser()
+    if path_mode == "absolute":
+        return str(track_path.resolve())
+    if path_mode == "relative":
+        try:
+            return os.path.relpath(track_path.resolve(), start=base_dir.resolve())
+        except ValueError:
+            return str(track_path)
+    return path
 
 
 def _search_payload(response: Any, *, db_path: str, concise: bool) -> dict[str, Any]:
@@ -1084,13 +1226,46 @@ def _maybe_parse_with_llm(
 
 
 def _print_m3u(results: list[Any]) -> None:
-    print("#EXTM3U")
+    print(_m3u_text(results, path_mode="stored", base_dir=Path.cwd()), end="")
+
+
+def _m3u_text(results: list[Any], *, path_mode: str, base_dir: Path) -> str:
+    lines = ["#EXTM3U"]
     for result in results:
         artist_title = " - ".join(
             part for part in [result.artist, result.title] if part
         ) or result.path
-        print(f"#EXTINF:-1,{artist_title}")
-        print(result.path)
+        lines.append(f"#EXTINF:-1,{artist_title}")
+        lines.append(
+            _export_result_path(result.path, path_mode=path_mode, base_dir=base_dir)
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _csv_text(results: list[Any], *, path_mode: str, base_dir: Path) -> str:
+    stream = io.StringIO()
+    writer = csv.DictWriter(
+        stream,
+        fieldnames=["track_id", "path", "title", "artist", "album", "genre", "score"],
+    )
+    writer.writeheader()
+    for result in results:
+        writer.writerow(
+            {
+                "track_id": result.track_id,
+                "path": _export_result_path(
+                    result.path,
+                    path_mode=path_mode,
+                    base_dir=base_dir,
+                ),
+                "title": result.title or "",
+                "artist": result.artist or "",
+                "album": result.album or "",
+                "genre": result.genre or "",
+                "score": result.score,
+            }
+        )
+    return stream.getvalue()
 
 
 def _sqlite_fts5_available() -> bool:

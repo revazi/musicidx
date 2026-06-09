@@ -1,6 +1,6 @@
 # musicidx Implementation Phases
 
-This document defines the phased implementation plan for a local-first CLI tool, and later a macOS app, that indexes a local music library and enables natural-language music search such as:
+This document defines the phased implementation plan for a local-first CLI tool, and later a cross-platform desktop app, that indexes a local music library and enables natural-language music search such as:
 
 - “Give me a list of 10 tracks, I’m today playing in a chill bar”
 - “Shower music”
@@ -17,7 +17,7 @@ local music library
   -> SQLite index
   -> natural-language intent parser
   -> hybrid search/ranking
-  -> CLI now, macOS app later
+  -> CLI now, cross-platform desktop app later
 ```
 
 The local LLM should not be responsible for listening to or analyzing raw audio. It should translate natural-language user requests into structured search intent. The search/ranking system should then retrieve real tracks from the local database.
@@ -39,7 +39,10 @@ The local LLM should not be responsible for listening to or analyzing raw audio.
 10. Feedback/evaluation loop
 11. Optional Essentia ML tags
 12. Optional CLAP/MERT audio embeddings
-13. SwiftUI macOS wrapper
+13. Cross-platform desktop wrapper
+14. Post-UI search quality tuning
+15. Post-UI explanation polish
+16. Post-UI playlist and saved-search workflow
 ```
 
 ---
@@ -86,7 +89,7 @@ The local LLM should not be responsible for listening to or analyzing raw audio.
            │
            ▼
 ┌───────────────────────────────────────────────────────┐
-│ CLI now, macOS app later                               │
+│ CLI now, cross-platform desktop app later              │
 │ - search results                                       │
 │ - explanations                                         │
 │ - M3U/JSON export                                      │
@@ -109,7 +112,7 @@ Audio analysis:   librosa first; Essentia optional later
 Local LLM:        Ollama first; llama.cpp later
 Embeddings:       sentence-transformers for track-profile text
 Packaging:        uv/Poetry for development; PyInstaller/Briefcase later
-macOS app:        SwiftUI frontend calling CLI/helper engine
+Desktop app:      Tauri/Electron/PySide6 wrapper calling CLI/helper engine
 ```
 
 ---
@@ -118,7 +121,7 @@ macOS app:        SwiftUI frontend calling CLI/helper engine
 
 ## Goal
 
-Create a local-first CLI project with a clean architecture that can later become a macOS app backend.
+Create a local-first CLI project with a clean architecture that can later become a cross-platform desktop app backend.
 
 ## Steps for Pi Coding Agent
 
@@ -1332,28 +1335,56 @@ Keep this only if it improves evaluation metrics.
 
 ---
 
-# macOS App Plan
+# Phase 13 — Cross-Platform Desktop Wrapper
 
-## Recommended macOS Architecture
+## Goal
+
+Add a desktop UI that works on Windows and macOS while keeping the Python CLI/search engine as the local-first backend.
+
+## Recommended Cross-Platform Architecture
 
 Start with:
 
 ```text
-SwiftUI app
-  -> local helper CLI: musicidx
+Cross-platform desktop UI
+  -> local helper CLI: musicidx --json
   -> SQLite index
-  -> audio files selected by user
+  -> local models/audio files selected by user
 ```
 
-Later:
+Recommended wrapper options:
 
 ```text
-SwiftUI app
-  -> XPC/helper daemon or embedded Rust/Python engine
+Tauri + Python sidecar
+  Pros: lightweight, modern, Windows/macOS/Linux support
+  Cons: Rust/Tauri packaging complexity
+
+Electron + Python sidecar
+  Pros: mature, easiest cross-platform desktop packaging
+  Cons: larger app size and higher memory use
+
+PySide6/Qt
+  Pros: Python-native, can call engine directly or via CLI
+  Cons: UI polish and packaging ML/audio dependencies need care
+```
+
+Default recommendation:
+
+```text
+Use Tauri for the long-term app if packaging proves manageable.
+Use Electron if the priority is the fastest Windows/macOS MVP.
+Keep the CLI/helper JSON contract stable either way.
+```
+
+Later, only if needed:
+
+```text
+Desktop UI
+  -> bundled helper service or sidecar engine
   -> SQLite + local models
 ```
 
-## macOS App Features, v1
+## Desktop App Features, v1
 
 ```text
 Select music folder
@@ -1361,21 +1392,158 @@ Show indexing progress
 Show analyzed track count
 Natural-language search box
 Result list with title/artist/reason
-Open file in Finder
+Open file in file manager/Finder/Explorer
 Play preview
 Export playlist
 Feedback buttons: good / bad / too energetic / too sad / not chill
 ```
 
-## macOS-Specific Concerns
+## Cross-Platform Concerns
 
 ```text
-Sandboxed app needs user-granted folder access.
-Use persistent security-scoped bookmarks.
-Store SQLite DB in Application Support.
-Keep analysis jobs cancellable.
-Use the CLI/helper as a stable boundary before rewriting engine internals.
+Windows and macOS filesystem paths differ; keep paths normalized in JSON.
+Bundle or detect ffmpeg/ffprobe and fpcalc per platform.
+Package Python, native audio/ML dependencies, and local models carefully.
+Store SQLite DB in the platform-appropriate app data directory for packaged apps.
+Keep the CLI/helper as a stable boundary before rewriting engine internals.
+Do not require admin privileges for normal indexing/search.
 ```
+
+## Acceptance Criteria
+
+A non-technical user on Windows or macOS can select a music folder, index it, search it, inspect explanations, and export a playlist without using the terminal.
+
+---
+
+# Post-UI Phases
+
+These phases should happen after the first cross-platform desktop UI can index a folder, run a search, and display results. The goal is to tune quality with real interaction instead of guessing from CLI output alone.
+
+## Phase 14 — Post-UI Search Quality Tuning
+
+### Goal
+
+Improve ranking quality once search results can be reviewed quickly in the UI.
+
+### Steps for Pi Coding Agent
+
+1. Create a small repeatable query set for common use cases:
+
+```text
+chill bar
+shower music
+focus coding ambient
+sad reflective songs
+party electronic
+aggressive workout
+sleepy calm
+```
+
+2. Add configurable ranking weights for the main scoring signals:
+
+```text
+semantic/profile similarity
+ML mood/genre tags
+audio feature fit
+text/FTS match
+artist/album diversity
+```
+
+3. Improve context mappings for high-value intents:
+
+```text
+bar
+shower
+focus
+party
+sleep
+workout
+sad / melancholic
+```
+
+4. Calibrate feature ranges and tag boosts using actual library results.
+
+5. Use the evaluation harness and UI feedback to compare before/after ranking changes.
+
+### Acceptance Criteria
+
+For the saved query set, top-10 results should visibly improve and regressions should be easy to detect.
+
+---
+
+## Phase 15 — Post-UI Explanation Polish
+
+### Goal
+
+Make result explanations shorter, prettier, and useful in both CLI and UI.
+
+### Steps for Pi Coding Agent
+
+1. Convert verbose score details into concise reason summaries:
+
+```text
+Matched chill/bar mood, low-medium energy, downtempo tags.
+```
+
+2. Show only the most useful evidence first:
+
+```text
+top matched tags
+top feature matches
+semantic/profile match when available
+main penalty, if any
+```
+
+3. Keep machine-readable explanation data available for JSON/UI consumers.
+
+4. Ensure `--explain` remains readable in terminal table output.
+
+5. Ensure `--format json --concise` stays compact enough for UI/API use.
+
+### Acceptance Criteria
+
+Users can understand why a result appeared without reading raw score breakdowns.
+
+---
+
+## Phase 16 — Post-UI Playlist and Saved-Search Workflow
+
+### Goal
+
+Make good search results easy to reuse, export, and refine.
+
+### Steps for Pi Coding Agent
+
+1. Add saved searches:
+
+```bash
+musicidx saved-searches add chill-bar "chill bar" --limit 25
+musicidx saved-searches list
+musicidx saved-searches run chill-bar
+```
+
+2. Add saved playlists generated from searches:
+
+```bash
+musicidx playlists save chill-bar "chill bar" --limit 25
+musicidx playlists list
+musicidx playlists show chill-bar
+```
+
+3. Polish playlist export:
+
+```bash
+musicidx playlists export chill-bar --format m3u --out chill-bar.m3u
+musicidx search "ambient background" --format m3u --absolute-paths
+```
+
+4. Support UI-friendly JSON contracts for saved searches and playlists.
+
+5. Add lightweight commands for editing or deleting saved items.
+
+### Acceptance Criteria
+
+A user can search, save the result set, rerun it later, and export it as an M3U playlist from either CLI or UI.
 
 ---
 
@@ -1603,7 +1771,7 @@ Requirements:
 
 # Final Recommendation
 
-Build the CLI first and make the database/search engine reliable before starting the macOS UI. The MVP does not need deep audio-text models. It needs:
+Build the CLI first and make the database/search engine reliable before starting the cross-platform desktop UI. The MVP does not need deep audio-text models. It needs:
 
 ```text
 reliable scanning

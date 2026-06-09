@@ -64,6 +64,8 @@ exports/
 .musicidx-models/
 local-library/
 media/
+test-music/*
+!test-music/.gitkeep
 
 # macOS
 .DS_Store
