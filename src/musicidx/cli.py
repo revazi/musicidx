@@ -50,6 +50,17 @@ from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
 from musicidx.scanner import scan_library
+from musicidx.search.evaluation import (
+    aggregate_eval_results,
+    evaluate_response,
+    load_eval_queries,
+)
+from musicidx.search.feedback import (
+    feedback_summary,
+    save_feedback_event,
+    save_search_event,
+    save_track_feedback,
+)
 from musicidx.search.intent import build_library_profile, parse_intent_dynamic
 from musicidx.search.llm import (
     LLMIntentError,
@@ -102,6 +113,7 @@ FingerprintMissingOnlyOption = Annotated[
     typer.Option("--missing-only", help="Only process tracks without stored fingerprints."),
 ]
 SearchQueryArg = Annotated[str, typer.Argument(help="Full-text query to search for.")]
+EvalFileArg = Annotated[Path, typer.Argument(help="JSON eval query file.")]
 LimitOption = Annotated[
     int,
     typer.Option("--limit", min=1, max=100, help="Maximum number of results."),
@@ -184,6 +196,18 @@ LlmTimeoutOption = Annotated[
 ConciseOption = Annotated[
     bool,
     typer.Option("--concise", help="Use shorter JSON output for search results."),
+]
+FeedbackRatingOption = Annotated[
+    str,
+    typer.Option("--rating", help="Feedback rating: good, bad, neutral, 1, 0, or -1."),
+]
+FeedbackQueryOption = Annotated[
+    str | None,
+    typer.Option("--query", help="Original search query for query-aware feedback."),
+]
+FeedbackNoteOption = Annotated[
+    str | None,
+    typer.Option("--note", help="Optional feedback note."),
 ]
 ExportFormatOption = Annotated[
     str,
@@ -956,6 +980,245 @@ def search_command(
     console.print(table)
 
 
+@app.command("eval")
+def eval_command(
+    eval_file: EvalFileArg,
+    db: DbOption = None,
+    limit: LimitOption = 10,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    include_missing: IncludeMissingOption = False,
+    use_llm: UseLlmOption = False,
+    llm_provider: LlmProviderOption = "gemini",
+    llm_model: LlmModelOption = None,
+    llm_timeout: LlmTimeoutOption = 30.0,
+    json_output: JsonOption = False,
+) -> None:
+    """Run a repeatable search-quality eval query set."""
+    try:
+        eval_queries = load_eval_queries(eval_file)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        results = []
+        for eval_query in eval_queries:
+            llm_hints, parser, llm_error = _maybe_parse_with_llm(
+                conn,
+                eval_query.text,
+                use_llm=use_llm,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                timeout_sec=llm_timeout,
+                include_missing=include_missing,
+            )
+            response = search_music(
+                conn,
+                eval_query.text,
+                limit=limit,
+                include_missing=include_missing,
+                semantic_model=semantic_model,
+                explain=False,
+                llm_hints=llm_hints,
+                parser=parser,
+                llm_error=llm_error,
+            )
+            results.append(evaluate_response(conn, eval_query, response))
+        payload = {
+            "db_path": str(db_path),
+            "eval_file": str(eval_file),
+            "limit": limit,
+            "summary": aggregate_eval_results(results),
+            "feedback_summary": feedback_summary(conn),
+            "results": results,
+        }
+    finally:
+        conn.close()
+
+    if json_output:
+        _print_json(payload)
+        return
+
+    summary = payload["summary"]
+    console.print(
+        "[bold]Eval summary:[/bold] "
+        f"queries={summary['query_count']} "
+        f"precision@{limit}={summary['avg_precision_at_k']:.3f} "
+        f"avoid={summary['avg_avoid_rate']:.3f} "
+        f"coverage={summary['avg_tag_coverage']:.3f} "
+        f"diversity={summary['avg_diversity_score']:.3f}"
+    )
+    table = Table(title="Search-quality eval")
+    table.add_column("ID")
+    table.add_column("Query")
+    table.add_column(f"P@{limit}", justify="right")
+    table.add_column("Avoid", justify="right")
+    table.add_column("Coverage", justify="right")
+    table.add_column("Diversity", justify="right")
+    table.add_column("Top result")
+    for result in results:
+        top = result["top_results"][0] if result["top_results"] else {}
+        title = top.get("title") or top.get("track_id") or ""
+        artist = top.get("artist") or ""
+        table.add_row(
+            result["id"],
+            result["query"],
+            f"{result['precision_at_k']:.3f}",
+            f"{result['avoid_rate']:.3f}",
+            f"{result['tag_coverage']:.3f}",
+            f"{result['diversity_score']:.3f}",
+            " - ".join(part for part in [artist, title] if part),
+        )
+    console.print(table)
+
+
+@app.command("judge")
+def judge_command(
+    query: SearchQueryArg,
+    db: DbOption = None,
+    limit: LimitOption = 10,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    include_missing: IncludeMissingOption = False,
+    use_llm: UseLlmOption = False,
+    llm_provider: LlmProviderOption = "gemini",
+    llm_model: LlmModelOption = None,
+    llm_timeout: LlmTimeoutOption = 30.0,
+) -> None:
+    """Interactively mark search results as good or bad matches."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    saved = 0
+    skipped = 0
+    try:
+        init_db(conn)
+        llm_hints, parser, llm_error = _maybe_parse_with_llm(
+            conn,
+            query,
+            use_llm=use_llm,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            timeout_sec=llm_timeout,
+            include_missing=include_missing,
+        )
+        response = search_music(
+            conn,
+            query,
+            limit=limit,
+            include_missing=include_missing,
+            semantic_model=semantic_model,
+            explain=True,
+            llm_hints=llm_hints,
+            parser=parser,
+            llm_error=llm_error,
+        )
+        event_id = save_search_event(conn, response)
+        console.print(f"[bold]Judging search:[/bold] {query}")
+        console.print("Choose [green]y[/green]=good, [red]n[/red]=bad, s=skip, q=quit.")
+        for index, result in enumerate(response.results, start=1):
+            console.print()
+            console.print(
+                f"[bold]{index}/{len(response.results)}[/bold] "
+                f"score={result.score:.3f} track_id={result.track_id}"
+            )
+            console.print(
+                " - ".join(part for part in [result.artist, result.title] if part)
+                or result.path
+            )
+            if result.album:
+                console.print(f"Album: {result.album}")
+            console.print(f"Path: {result.path}")
+            if result.explanation:
+                console.print("Why: " + "; ".join(result.explanation))
+            choice = typer.prompt("Good match? [y/n/s/q]", default="s", show_default=False)
+            normalized = choice.strip().lower()
+            if normalized in {"q", "quit"}:
+                break
+            if normalized in {"y", "yes", "+", "1"}:
+                save_track_feedback(
+                    conn,
+                    search_event_id=event_id,
+                    track_id=result.track_id,
+                    rating=1,
+                )
+                saved += 1
+            elif normalized in {"n", "no", "-", "-1"}:
+                save_track_feedback(
+                    conn,
+                    search_event_id=event_id,
+                    track_id=result.track_id,
+                    rating=-1,
+                )
+                saved += 1
+            else:
+                skipped += 1
+        summary = feedback_summary(conn)
+    finally:
+        conn.close()
+
+    console.print(
+        f"[green]Saved feedback:[/green] {saved}; skipped: {skipped}; "
+        f"total feedback rows: {summary['total']}"
+    )
+
+
+@app.command("feedback")
+def feedback_command(
+    track_id: RequiredTrackIdOption,
+    rating: FeedbackRatingOption,
+    query: FeedbackQueryOption = None,
+    note: FeedbackNoteOption = None,
+    db: DbOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """Store one non-interactive feedback judgment for UI integrations."""
+    parsed_rating = _parse_feedback_rating(rating)
+    if parsed_rating is None:
+        console.print("[red]Error:[/red] --rating must be one of: good, bad, neutral, 1, 0, -1")
+        raise typer.Exit(1)
+
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        row = conn.execute("SELECT id FROM tracks WHERE id = ?", (track_id,)).fetchone()
+        if row is None:
+            console.print(f"[red]Error:[/red] unknown track ID: {track_id}")
+            raise typer.Exit(1)
+        event_id = None
+        if query:
+            event_id = save_feedback_event(conn, query=query, track_ids=[track_id])
+        feedback_id = save_track_feedback(
+            conn,
+            search_event_id=event_id,
+            track_id=track_id,
+            rating=parsed_rating,
+            note=note,
+        )
+        summary = feedback_summary(conn)
+    finally:
+        conn.close()
+
+    payload = {
+        "db_path": str(db_path),
+        "feedback_id": feedback_id,
+        "search_event_id": event_id,
+        "track_id": track_id,
+        "rating": parsed_rating,
+        "query": query,
+        "note": note,
+        "feedback_summary": summary,
+    }
+    if json_output:
+        _print_json(payload)
+        return
+    console.print(
+        f"[green]Saved feedback[/green] track_id={track_id} rating={parsed_rating}"
+    )
+
+
 @app.command("export")
 def export_command(
     query: SearchQueryArg,
@@ -1087,6 +1350,17 @@ def models_list_command(
     console.print(table)
 
 
+def _parse_feedback_rating(value: str) -> int | None:
+    normalized = value.strip().lower()
+    if normalized in {"good", "yes", "y", "+", "+1", "1", "positive"}:
+        return 1
+    if normalized in {"bad", "no", "n", "-", "-1", "negative"}:
+        return -1
+    if normalized in {"neutral", "skip", "s", "0"}:
+        return 0
+    return None
+
+
 def _export_path_mode(*, absolute_paths: bool, relative_paths: bool) -> str:
     if absolute_paths:
         return "absolute"
@@ -1186,6 +1460,7 @@ def _concise_result(result: Any) -> dict[str, Any]:
             "tags": round(float(breakdown.get("tag_score", 0.0)), 6),
             "features": round(float(breakdown.get("feature_score", 0.0)), 6),
             "text": round(float(breakdown.get("text_score", 0.0)), 6),
+            "feedback": round(float(breakdown.get("feedback_score", 0.0)), 6),
         },
         "matched_tags": [
             {

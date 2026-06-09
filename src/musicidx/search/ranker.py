@@ -81,8 +81,9 @@ def search_music(
         intent,
         include_missing=include_missing,
     )
+    feedback_scores = _feedback_scores(conn, query, include_missing=include_missing)
 
-    weights = _weights(use_semantic=bool(semantic_scores))
+    weights = _weights(use_semantic=bool(semantic_scores), use_feedback=bool(feedback_scores))
     scored_results: list[SearchResult] = []
     for row in track_rows:
         track_id = row["track_id"]
@@ -93,6 +94,7 @@ def search_music(
             intent,
             fts_score=fts_scores.get(track_id, 0.0),
             semantic_score=semantic_scores.get(track_id, 0.0),
+            feedback_score=feedback_scores.get(track_id, 0.0),
             weights=weights,
         )
         scored_results.append(
@@ -115,6 +117,7 @@ def search_music(
         "candidate_count": len(track_rows),
         "fts_candidate_count": len(fts_scores),
         "semantic_candidate_count": len(semantic_scores),
+        "feedback_candidate_count": len(feedback_scores),
         "semantic_error": semantic_error,
         "weights": weights,
     }
@@ -248,6 +251,7 @@ def _score_track(
     *,
     fts_score: float,
     semantic_score: float,
+    feedback_score: float,
     weights: dict[str, float],
 ) -> dict[str, Any]:
     tag_score, matched_tags, avoided_tags = _tag_score(track_tags, intent)
@@ -259,6 +263,7 @@ def _score_track(
         + weights["tags"] * tag_score
         + weights["features"] * feature_score
         + weights["text"] * text_score
+        + weights.get("feedback", 0.0) * feedback_score
     )
 
     return {
@@ -267,6 +272,7 @@ def _score_track(
         "tag_score": tag_score,
         "feature_score": feature_score,
         "text_score": text_score,
+        "feedback_score": feedback_score,
         "matched_tags": matched_tags,
         "avoided_tags": avoided_tags,
         "feature_reasons": feature_reasons,
@@ -351,10 +357,51 @@ def _profile_term_score(profile_text: str, query_terms: list[str]) -> float:
     return matched / len(query_terms)
 
 
-def _weights(*, use_semantic: bool) -> dict[str, float]:
+def _feedback_scores(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    include_missing: bool,
+) -> dict[str, float]:
+    """Return small query-aware feedback boosts/penalties in the range [-1, 1]."""
+    missing_clause = "" if include_missing else "AND t.missing_at IS NULL"
+    rows = conn.execute(
+        f"""
+        SELECT
+            f.track_id,
+            AVG(
+                CASE
+                    WHEN LOWER(COALESCE(se.query, '')) = LOWER(?) THEN f.rating
+                    ELSE f.rating * 0.25
+                END
+            ) AS feedback_score
+        FROM feedback f
+        JOIN tracks t ON t.id = f.track_id
+        LEFT JOIN search_events se ON se.id = f.search_event_id
+        WHERE 1 = 1
+          {missing_clause}
+        GROUP BY f.track_id
+        """,
+        (query,),
+    ).fetchall()
+    return {
+        row["track_id"]: max(-1.0, min(1.0, float(row["feedback_score"] or 0.0)))
+        for row in rows
+    }
+
+
+def _weights(*, use_semantic: bool, use_feedback: bool) -> dict[str, float]:
     if use_semantic:
-        return {"semantic": 0.30, "tags": 0.30, "features": 0.25, "text": 0.15}
-    return {"semantic": 0.0, "tags": 0.40, "features": 0.35, "text": 0.25}
+        weights = {"semantic": 0.30, "tags": 0.30, "features": 0.25, "text": 0.15}
+    else:
+        weights = {"semantic": 0.0, "tags": 0.40, "features": 0.35, "text": 0.25}
+    if use_feedback:
+        weights["features"] = max(0.0, weights["features"] - 0.03)
+        weights["text"] = max(0.0, weights["text"] - 0.02)
+        weights["feedback"] = 0.05
+    else:
+        weights["feedback"] = 0.0
+    return weights
 
 
 def _apply_diversity(results: list[SearchResult], intent: SearchIntent) -> list[SearchResult]:

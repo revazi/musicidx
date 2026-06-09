@@ -34,6 +34,12 @@ def build_explanation(breakdown: dict[str, Any]) -> list[str]:
     if text_score is not None and text_score > 0:
         lines.append(f"text/profile match {text_score:.2f}")
 
+    feedback_score = breakdown.get("feedback_score")
+    if feedback_score is not None and feedback_score > 0:
+        lines.append(f"positive feedback boost {feedback_score:.2f}")
+    elif feedback_score is not None and feedback_score < 0:
+        lines.append(f"negative feedback penalty {feedback_score:.2f}")
+
     if not lines:
         lines.append("included as a local-library candidate")
     return lines

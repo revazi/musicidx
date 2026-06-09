@@ -16,6 +16,13 @@ dist/
 .eggs/
 *.egg
 
+# Node/Tauri desktop artifacts
+node_modules/
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/schemas/
+
 # Test/coverage artifacts
 .pytest_cache/
 .coverage

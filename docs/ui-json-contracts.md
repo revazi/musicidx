@@ -1,6 +1,6 @@
 # MusicIdx UI JSON Contracts
 
-This document captures the JSON-oriented CLI commands that a future cross-platform desktop UI can call. Treat these as the preferred integration surface before adding any desktop wrapper.
+This document captures the JSON-oriented CLI commands that the cross-platform desktop UI can call. Treat these as the preferred integration surface for the Tauri wrapper.
 
 ## Principles
 
@@ -101,6 +101,22 @@ Important result fields:
 | `why` | Human-readable explanations when `--explain` is used. |
 | `scores` | Compact score components. |
 | `matched_tags` | Top matched ML/local tags. |
+
+### Evaluation and feedback
+
+```bash
+musicidx eval eval/search_queries.json --limit 10 --json
+musicidx judge "chill bar" --limit 10
+musicidx feedback --track-id <id> --query "chill bar" --rating good --json
+```
+
+Expected use:
+
+- run repeatable search-quality checks before/after ranking changes
+- collect local good/bad judgments from users
+- use feedback-aware ranking in later searches
+
+`judge` is interactive and is mainly a CLI/manual workflow. The Tauri UI uses the non-interactive `feedback` command for result-card good/bad/neutral buttons.
 
 ### Playlist/export
 

@@ -16,11 +16,12 @@ Implemented so far:
 - Dynamic library-aware natural-language parsing and hybrid search
 - Optional Gemini/OpenAI intent parsing hints with local DB-only ranking
 - M3U/JSON/CSV playlist-style search export
+- Repeatable search-quality eval and interactive feedback judging
+- Early Tauri cross-platform desktop UI scaffold
 
 Not implemented yet:
 
-- Feedback/evaluation loop
-- Cross-platform desktop UI
+- Packaged Windows/macOS desktop releases
 
 ## Local-first behavior
 
@@ -124,6 +125,18 @@ Check local capabilities:
 musicidx doctor
 musicidx doctor --json
 ```
+
+## Desktop UI scaffold
+
+An early Tauri desktop wrapper lives in `desktop/`. It calls the existing local `musicidx` CLI instead of reimplementing indexing/search. It uses a minimal React/Tailwind shadcn-style UI with subtle purple accents, native folder/file pickers, floating indexing/export actions, progress, advanced indexing actions in Settings, streamed command output, collapsible search result cards, feedback buttons, eval, and M3U export.
+
+```bash
+cd desktop
+npm install
+MUSICIDX_CLI_PATH=uv MUSICIDX_CLI_PREFIX_ARGS="run musicidx" npm run tauri:dev
+```
+
+See `docs/desktop-tauri.md` for setup notes and current limitations. Sidecar packaging is intentionally not implemented yet.
 
 ## Supported audio extensions
 
@@ -570,6 +583,38 @@ The dedicated `export` command uses the same local parser/ranker as `search`, an
 
 For future desktop-wrapper integration notes, see `docs/ui-json-contracts.md`. A starter search-quality query set lives in `eval/search_queries.json`.
 
+## Evaluation and feedback workflow
+
+Run the starter subjective eval set:
+
+```bash
+musicidx eval eval/search_queries.json --limit 10
+musicidx eval eval/search_queries.json --limit 10 --json
+```
+
+Interactively judge a search and store local feedback:
+
+```bash
+musicidx judge "chill bar" --limit 10
+```
+
+Store one non-interactive feedback row, useful for UI integrations:
+
+```bash
+musicidx feedback --track-id <track-id> --query "chill bar" --rating good --json
+```
+
+Judging choices:
+
+```text
+y = good match
+n = bad match
+s = skip
+q = quit
+```
+
+Stored feedback is local SQLite data. Search ranking applies a small query-aware feedback boost/penalty after feedback exists, so repeated judged searches can improve over time.
+
 ## JSON output
 
 Commands intended for automation support `--json`, including:
@@ -594,6 +639,8 @@ musicidx search "chill bar" --json
 musicidx search "chill bar" --json --concise
 musicidx search "chill bar" --llm --json
 musicidx search "chill bar" --llm --json --concise
+musicidx eval eval/search_queries.json --json
+musicidx feedback --track-id <track-id> --rating good --json
 musicidx export "chill bar" --json
 musicidx models list --json
 ```
@@ -733,6 +780,41 @@ musicidx search "shower music" --format json --concise
 musicidx search "focus music" --llm --llm-provider gemini --limit 10 --explain
 musicidx search "ambient background" --format m3u > ambient.m3u
 ```
+
+### `musicidx eval <eval-file.json>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--limit N` | Limit results evaluated per query, 1–100. |
+| `--semantic-model NAME_OR_PATH` | Embedding model name/path to use if matching embeddings exist. |
+| `--include-missing` | Include tracks marked missing from disk. Default: false. |
+| `--llm / --no-llm` | Enable/disable LLM intent hints. Default: disabled. |
+| `--llm-provider PROVIDER` | LLM provider. Supported: `gemini`, `openai`. Default: `gemini`. |
+| `--llm-model MODEL` | Provider model override. |
+| `--llm-timeout SECONDS` | LLM request timeout. |
+| `--json` | Print eval metrics as JSON. |
+
+### `musicidx judge <query>`
+
+| Flag | Meaning |
+| --- | --- |
+| `--limit N` | Limit results to judge, 1–100. |
+| `--semantic-model NAME_OR_PATH` | Embedding model name/path to use if matching embeddings exist. |
+| `--include-missing` | Include tracks marked missing from disk. Default: false. |
+| `--llm / --no-llm` | Enable/disable LLM intent hints. Default: disabled. |
+| `--llm-provider PROVIDER` | LLM provider. Supported: `gemini`, `openai`. Default: `gemini`. |
+| `--llm-model MODEL` | Provider model override. |
+| `--llm-timeout SECONDS` | LLM request timeout. |
+
+### `musicidx feedback`
+
+| Flag | Meaning |
+| --- | --- |
+| `--track-id ID` | Required track ID to judge. |
+| `--rating good/bad/neutral` | Feedback rating. Also accepts `1`, `0`, `-1`. |
+| `--query TEXT` | Original search query for query-aware feedback. |
+| `--note TEXT` | Optional note. |
+| `--json` | Print saved feedback row summary as JSON. |
 
 ### `musicidx export <query>`
 
