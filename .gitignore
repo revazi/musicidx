@@ -41,6 +41,7 @@ htmlcov/
 # Local environment/config
 .env
 .env.*
+!.env.example
 *.local
 
 # SQLite/local index databases
