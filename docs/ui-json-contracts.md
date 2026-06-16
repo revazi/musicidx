@@ -32,18 +32,19 @@ Expected use:
 
 ```bash
 musicidx scan <folder> --json
-musicidx metadata --json
-musicidx fingerprint --json
-musicidx analyze-basic --json
-musicidx analyze-tags --json
-musicidx embed --json
+musicidx metadata --missing-only --json
+musicidx fingerprint --missing-only --json
+musicidx analyze-basic --quick --workers auto --resource-profile auto --json
+musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto --json
+musicidx embed --batch-size auto --resource-profile auto --json
 ```
 
 Expected use:
 
 - run each indexing step from a UI action or setup wizard
+- use adaptive low-impact defaults for one-click indexing
 - display command summaries and errors
-- keep long-running steps cancellable at the process level
+- keep long-running steps cancellable at the process/process-tree level
 
 ### Track inspection
 

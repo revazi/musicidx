@@ -223,12 +223,18 @@ def process_tags(
     *,
     models_path: Path,
     track_id: str | None = None,
+    track_ids: list[str] | None = None,
     missing_only: bool = False,
     min_score: float = DEFAULT_MIN_SCORE,
     workers: int = 1,
 ) -> TagAnalysisSummary:
     """Analyze selected tracks with local ML tag models."""
-    rows = _select_tracks_for_tags(conn, track_id=track_id, missing_only=missing_only)
+    rows = _select_tracks_for_tags(
+        conn,
+        track_id=track_id,
+        track_ids=track_ids,
+        missing_only=missing_only,
+    )
     specs = available_model_specs(models_path)
     summary = TagAnalysisSummary(model_count=len(specs))
 
@@ -493,6 +499,7 @@ def _select_tracks_for_tags(
     conn: sqlite3.Connection,
     *,
     track_id: str | None,
+    track_ids: list[str] | None = None,
     missing_only: bool,
 ) -> list[sqlite3.Row]:
     clauses = ["missing_at IS NULL"]
@@ -500,6 +507,12 @@ def _select_tracks_for_tags(
     if track_id is not None:
         clauses.append("id = ?")
         params.append(track_id)
+    if track_ids is not None:
+        if not track_ids:
+            return []
+        placeholders = ", ".join("?" for _ in track_ids)
+        clauses.append(f"id IN ({placeholders})")
+        params.extend(track_ids)
     if missing_only:
         clauses.append("id NOT IN (SELECT track_id FROM track_tags WHERE source LIKE 'essentia:%')")
 

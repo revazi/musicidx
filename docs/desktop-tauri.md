@@ -79,9 +79,11 @@ The Tauri UI can:
 - choose a working directory with a native directory picker
 - choose a music folder with a native directory picker
 - choose DB/model/export paths where useful
-- run the full indexing pipeline from a floating bottom-left icon button
+- run a cancellable low-impact/adaptive indexing pipeline from a floating bottom-left icon button
 - keep indexing setup and individual scan/metadata/fingerprint/basic/tag/embed actions in Settings
-- show pipeline progress by step in a floating progress panel
+- show pipeline progress by step in a floating progress panel with a Cancel button
+- choose an indexing resource profile: auto, low, balanced, or full
+- run ML tag analysis in adaptive subprocess batches to lower peak RAM
 - stream command stdout/stderr into an expandable live/raw output panel
 - parse natural-language intent
 - run concise JSON search with explanations
@@ -103,8 +105,9 @@ MUSICIDX_MODELS_PATH
 MUSICIDX_FFPROBE_PATH
 MUSICIDX_FPCALC_PATH
 semantic/embedding model
+indexing resource profile
 GEMINI_API_KEY
-LLM provider
+LLM provider/model
 ```
 
 For repo-local development, this is usually enough:
@@ -121,7 +124,7 @@ This is still an early wrapper scaffold.
 
 - Packaging the Python CLI sidecar is not implemented yet.
 - App-data DB/model locations are not implemented yet.
-- Long-running CLI commands stream output, but there is no structured progress percentage yet.
+- Long-running CLI commands stream output and can be cancelled, but there is no per-track structured progress percentage yet.
 - Feedback buttons call the CLI one rating at a time; batch feedback is not implemented yet.
 - Settings are local to the webview/localStorage and not a formal app config file yet.
 

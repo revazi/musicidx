@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 
 from musicidx.search.intent import LibraryProfile
 from musicidx.search.llm import intent_hints_from_json, parse_intent_gemini, parse_intent_openai
@@ -80,6 +82,50 @@ def test_parse_intent_gemini_uses_generate_content(monkeypatch):
     assert hints.contexts == ["focus"]
     assert hints.prefer_tag_concepts == ["ambient", "background"]
     assert hints.feature_preferences == {"energy": "low_mid", "aggression": "low"}
+
+
+def test_parse_intent_gemini_falls_back_when_configured_model_is_retired(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    seen_urls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            content = json.dumps({"contexts": ["focus"], "prefer_tag_concepts": ["ambient"]})
+            payload = {"candidates": [{"content": {"parts": [{"text": content}]}}]}
+            return json.dumps(payload).encode()
+
+    def fake_urlopen(request, timeout):
+        seen_urls.append(request.full_url)
+        if "gemini-1.5-flash" in request.full_url:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "not found",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":{"message":"retired"}}'),
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr("musicidx.search.llm.urllib.request.urlopen", fake_urlopen)
+
+    profile = LibraryProfile(
+        total_tracks=0,
+        tag_stats={},
+        feature_percentiles={},
+        embedding_models=[],
+    )
+    hints = parse_intent_gemini("focus music", profile, model="gemini-1.5-flash")
+
+    assert any("models/gemini-1.5-flash:generateContent" in url for url in seen_urls)
+    assert any("models/gemini-2.0-flash:generateContent" in url for url in seen_urls)
+    assert hints.contexts == ["focus"]
+    assert hints.prefer_tag_concepts == ["ambient"]
 
 
 def test_parse_intent_openai_uses_chat_completions(monkeypatch):

@@ -19,7 +19,7 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -90,11 +90,13 @@ type SettingsState = {
   ffprobePath: string;
   fpcalcPath: string;
   llmProvider: string;
+  llmModel: string;
   geminiKey: string;
   musicFolder: string;
   semanticModel: string;
   exportPath: string;
   themeMode: ThemeMode;
+  indexResourceProfile: string;
 };
 
 type IndexStep = {
@@ -105,6 +107,7 @@ type IndexStep = {
 
 const SETTINGS_KEY = "musicidx.desktop.settings.v2";
 const DEFAULT_SEMANTIC_MODEL = ".musicidx-models/all-MiniLM-L6-v2";
+const MAX_RAW_OUTPUT_CHARS = 512 * 1024;
 
 const defaultSettings: SettingsState = {
   cwd: "",
@@ -115,11 +118,13 @@ const defaultSettings: SettingsState = {
   ffprobePath: "",
   fpcalcPath: "",
   llmProvider: "gemini",
+  llmModel: "gemini-2.0-flash",
   geminiKey: "",
   musicFolder: "",
   semanticModel: DEFAULT_SEMANTIC_MODEL,
   exportPath: "",
   themeMode: "system",
+  indexResourceProfile: "auto",
 };
 
 export default function App() {
@@ -140,6 +145,9 @@ export default function App() {
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineStep, setPipelineStep] = useState("Idle");
   const [pipelineCompleted, setPipelineCompleted] = useState(0);
+  const [canceling, setCanceling] = useState(false);
+  const currentRequestIdRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
 
   const indexSteps = useMemo<IndexStep[]>(
     () => [
@@ -148,15 +156,57 @@ export default function App() {
         label: "Scan files",
         args: () => ["scan", required(settings.musicFolder, "Music folder"), "--json"],
       },
-      { id: "metadata", label: "Read metadata", args: () => ["metadata", "--json"] },
-      { id: "fingerprint", label: "Fingerprint", args: () => ["fingerprint", "--json"] },
-      { id: "basic", label: "Audio features", args: () => ["analyze-basic", "--json"] },
-      { id: "tags", label: "ML tags", args: () => ["analyze-tags", "--json"] },
+      {
+        id: "metadata",
+        label: "Read metadata",
+        args: () => ["metadata", "--missing-only", "--json"],
+      },
+      {
+        id: "fingerprint",
+        label: "Fingerprint",
+        args: () => ["fingerprint", "--missing-only", "--json"],
+      },
+      {
+        id: "basic",
+        label: "Audio features",
+        args: () => [
+          "analyze-basic",
+          "--quick",
+          "--workers",
+          "auto",
+          "--resource-profile",
+          settings.indexResourceProfile,
+          "--json",
+        ],
+      },
+      {
+        id: "tags",
+        label: "ML tags",
+        args: () => [
+          "analyze-tags",
+          "--missing-only",
+          "--workers",
+          "auto",
+          "--resource-profile",
+          settings.indexResourceProfile,
+          "--subprocess-batches",
+          "--batch-size",
+          "auto",
+          "--json",
+        ],
+      },
       {
         id: "embed",
         label: "Profile embeddings",
         args: () => {
-          const args = ["embed", "--json"];
+          const args = [
+            "embed",
+            "--batch-size",
+            "auto",
+            "--resource-profile",
+            settings.indexResourceProfile,
+            "--json",
+          ];
           if (settings.semanticModel.trim()) {
             args.splice(1, 0, "--model", settings.semanticModel.trim());
           }
@@ -164,7 +214,7 @@ export default function App() {
         },
       },
     ],
-    [settings.musicFolder, settings.semanticModel],
+    [settings.indexResourceProfile, settings.musicFolder, settings.semanticModel],
   );
 
   const pipelinePercent = Math.round((pipelineCompleted / indexSteps.length) * 100);
@@ -223,6 +273,8 @@ export default function App() {
 
   async function runFullIndexing() {
     persistSettings(settings);
+    cancelRequestedRef.current = false;
+    setCanceling(false);
     setPipelineRunning(true);
     setPipelineCompleted(0);
     setResults([]);
@@ -235,16 +287,19 @@ export default function App() {
       setPipelineStep("Complete");
       updateStatus("Indexing complete");
     } catch (error) {
-      setPipelineStep("Stopped");
+      setPipelineStep(cancelRequestedRef.current ? "Cancelled" : "Stopped");
       writeRaw(error);
-      updateStatus("Indexing failed", true);
+      updateStatus(cancelRequestedRef.current ? "Indexing cancelled" : "Indexing failed", !cancelRequestedRef.current);
     } finally {
       setPipelineRunning(false);
+      setCanceling(false);
     }
   }
 
   async function runAdvancedStep(step: IndexStep) {
     persistSettings(settings);
+    cancelRequestedRef.current = false;
+    setCanceling(false);
     setPipelineRunning(true);
     setPipelineStep(step.label);
     setPipelineCompleted(0);
@@ -252,8 +307,13 @@ export default function App() {
       await runJsonCommand(step.args());
       setPipelineCompleted(indexSteps.length);
       setPipelineStep("Complete");
+    } catch (error) {
+      setPipelineStep(cancelRequestedRef.current ? "Cancelled" : "Stopped");
+      writeRaw(error);
+      updateStatus(cancelRequestedRef.current ? "Indexing cancelled" : "Indexing failed", !cancelRequestedRef.current);
     } finally {
       setPipelineRunning(false);
+      setCanceling(false);
     }
   }
 
@@ -349,6 +409,23 @@ export default function App() {
     }
   }
 
+  async function cancelCurrentCommand() {
+    const requestId = currentRequestIdRef.current;
+    if (!requestId) {
+      return;
+    }
+    cancelRequestedRef.current = true;
+    setCanceling(true);
+    updateStatus("Cancelling…");
+    try {
+      await invoke<boolean>("cancel_musicidx", { requestId });
+    } catch (error) {
+      updateStatus("Could not cancel command", true);
+      writeRaw(error);
+      setCanceling(false);
+    }
+  }
+
   async function runJsonCommand<T = unknown>(args: string[]): Promise<T> {
     const output = await runTextCommand(args);
     const parsed = parseJsonish<T>(output.stdout);
@@ -381,6 +458,7 @@ export default function App() {
     let unlisten: UnlistenFn | null = null;
     let stdout = "";
     let stderr = "";
+    currentRequestIdRef.current = requestId;
 
     return new Promise<MusicidxOutput>((resolve, reject) => {
       let settled = false;
@@ -389,6 +467,10 @@ export default function App() {
           unlisten();
           unlisten = null;
         }
+        if (currentRequestIdRef.current === requestId) {
+          currentRequestIdRef.current = null;
+        }
+        setCanceling(false);
       };
 
       listen<MusicidxStreamEvent>("musicidx-output", (event) => {
@@ -400,11 +482,11 @@ export default function App() {
         if (!payload.done) {
           const line = `${payload.line}\n`;
           if (payload.stream === "stdout") {
-            stdout += line;
-            setRawOutput((current) => `${current}${line}`);
+            stdout = clampRawOutput(`${stdout}${line}`);
+            setRawOutput((current) => clampRawOutput(`${current}${line}`));
           } else if (payload.stream === "stderr") {
-            stderr += line;
-            setRawOutput((current) => `${current}[stderr] ${line}`);
+            stderr = clampRawOutput(`${stderr}${line}`);
+            setRawOutput((current) => clampRawOutput(`${current}[stderr] ${line}`));
           }
           return;
         }
@@ -443,6 +525,9 @@ export default function App() {
     }
     if (useLlm) {
       args.push("--llm", "--llm-provider", settings.llmProvider.trim() || "gemini");
+      if (settings.llmModel.trim()) {
+        args.push("--llm-model", settings.llmModel.trim());
+      }
     }
   }
 
@@ -456,7 +541,7 @@ export default function App() {
   }
 
   function writeRaw(value: unknown) {
-    setRawOutput(formatValue(value));
+    setRawOutput(clampRawOutput(formatValue(value)));
   }
 
   function displayCommand(args: string[]) {
@@ -566,8 +651,20 @@ export default function App() {
                   <option value="light">Light</option>
                 </select>
               </Field>
+              <Field label="Indexing resource profile">
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={settings.indexResourceProfile}
+                  onChange={(event) => updateSettings({ indexResourceProfile: event.target.value })}
+                >
+                  <option value="auto">Auto</option>
+                  <option value="low">Low impact</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="full">Full</option>
+                </select>
+              </Field>
               <div className="rounded-lg border bg-muted p-3 text-sm text-muted-foreground">
-                Native window theme follows this setting where supported.
+                Auto scales workers/batch size from RAM/CPU. ML tags stay serial for now to avoid TensorFlow memory spikes.
               </div>
               <Field label="Working directory" className="md:col-span-2">
                 <PathInput
@@ -638,6 +735,13 @@ export default function App() {
                 <Input
                   value={settings.llmProvider}
                   onChange={(event) => updateSettings({ llmProvider: event.target.value })}
+                />
+              </Field>
+              <Field label="LLM model">
+                <Input
+                  value={settings.llmModel}
+                  placeholder="gemini-2.0-flash"
+                  onChange={(event) => updateSettings({ llmModel: event.target.value })}
                 />
               </Field>
               <Field label="Gemini API key">
@@ -778,14 +882,19 @@ export default function App() {
         </pre>
       </details>
 
-      {(pipelineRunning || pipelineStep !== "Idle") && (
-        <div className="fixed bottom-24 left-4 z-40 w-[min(calc(100vw-2rem),22rem)] rounded-xl border bg-card/95 p-4 shadow-xl backdrop-blur">
+      {pipelineRunning && (
+        <div className="fixed bottom-20 left-4 z-40 w-[min(calc(100vw-2rem),20rem)] rounded-xl border bg-card/85 p-4 shadow-xl backdrop-blur-md">
           <div className="mb-2 flex items-center justify-between gap-3 text-sm">
             <span className="font-medium">Indexing</span>
             <span className="tabular-nums text-muted-foreground">{pipelinePercent}%</span>
           </div>
           <Progress value={pipelinePercent} />
-          <p className="mt-2 wrap-anywhere text-xs text-muted-foreground">{pipelineStep}</p>
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <p className="min-w-0 wrap-anywhere text-xs text-muted-foreground">{pipelineStep}</p>
+            <Button size="sm" variant="outline" disabled={canceling} onClick={cancelCurrentCommand}>
+              {canceling ? "Cancelling…" : "Cancel"}
+            </Button>
+          </div>
         </div>
       )}
 
@@ -916,13 +1025,14 @@ function FloatingActionButton({
   return (
     <div
       className={cn(
-        "group fixed bottom-5 z-50",
+        "group fixed bottom-5 z-50 flex h-11 w-11 items-center justify-center",
         side === "left" ? "left-4" : "right-4",
       )}
     >
       <div
+        role="tooltip"
         className={cn(
-          "pointer-events-none absolute bottom-16 whitespace-nowrap rounded-md border bg-card px-3 py-1.5 text-xs text-card-foreground opacity-0 shadow-lg transition-opacity group-hover:opacity-100",
+          "pointer-events-none absolute bottom-[calc(100%+0.6rem)] max-w-[calc(100vw-2rem)] whitespace-nowrap rounded-md border bg-card/90 px-3 py-1.5 text-xs text-card-foreground opacity-0 shadow-lg backdrop-blur-md transition-all duration-150 group-hover:-translate-y-0.5 group-hover:opacity-100 group-focus-within:-translate-y-0.5 group-focus-within:opacity-100",
           side === "left" ? "left-0" : "right-0",
         )}
       >
@@ -933,7 +1043,8 @@ function FloatingActionButton({
         disabled={disabled}
         onClick={onClick}
         aria-label={label}
-        className="h-14 w-14 rounded-full bg-primary/90 shadow-2xl shadow-primary/20 backdrop-blur hover:bg-primary"
+        title={label}
+        className="h-11 w-11 rounded-full border border-primary/25 bg-primary/70 text-primary-foreground shadow-xl shadow-primary/15 backdrop-blur-md hover:bg-primary/85"
       >
         {children}
       </Button>
@@ -1029,6 +1140,7 @@ function envOverrides(settings: SettingsState): Record<string, string> {
   setEnv(env, "MUSICIDX_MODELS_PATH", settings.modelsPath);
   setEnv(env, "MUSICIDX_FFPROBE_PATH", settings.ffprobePath);
   setEnv(env, "MUSICIDX_FPCALC_PATH", settings.fpcalcPath);
+  setEnv(env, "MUSICIDX_GEMINI_MODEL", settings.llmModel);
   setEnv(env, "GEMINI_API_KEY", settings.geminiKey);
   return env;
 }
@@ -1079,6 +1191,15 @@ function formatValue(value: unknown): string {
     return value.message;
   }
   return JSON.stringify(value, null, 2);
+}
+
+function clampRawOutput(value: string): string {
+  if (value.length <= MAX_RAW_OUTPUT_CHARS) {
+    return value;
+  }
+  return `[output truncated to last ${Math.round(MAX_RAW_OUTPUT_CHARS / 1024)}KB]\n${value.slice(
+    -MAX_RAW_OUTPUT_CHARS,
+  )}`;
 }
 
 function randomId(): string {

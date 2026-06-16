@@ -24,7 +24,7 @@ from musicidx.search.intent import (
     LibraryProfile,
 )
 
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -96,7 +96,7 @@ def parse_intent_gemini(
     if not api_key:
         raise LLMIntentError(f"{GEMINI_API_KEY_ENV_VAR} is not set")
 
-    selected_model = model or default_gemini_model()
+    selected_model = _normalize_gemini_model(model or default_gemini_model())
     payload = {
         "systemInstruction": {"parts": [{"text": _system_prompt()}]},
         "contents": [
@@ -111,23 +111,12 @@ def parse_intent_gemini(
         },
     }
 
-    request = urllib.request.Request(
-        _gemini_generate_content_url(selected_model, api_key),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    body = _gemini_request_with_model_fallback(
+        payload,
+        selected_model=selected_model,
+        api_key=api_key,
+        timeout_sec=timeout_sec,
     )
-
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise LLMIntentError(f"Gemini request failed: HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise LLMIntentError(f"Gemini request failed: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise LLMIntentError("Gemini request timed out") from exc
 
     try:
         data = json.loads(body)
@@ -260,9 +249,79 @@ If unsure, produce broad mood/genre concepts rather than track recommendations.
 """.strip()
 
 
+def _gemini_request_with_model_fallback(
+    payload: dict[str, Any],
+    *,
+    selected_model: str,
+    api_key: str,
+    timeout_sec: float,
+) -> str:
+    models_to_try = _gemini_models_to_try(selected_model)
+    errors: list[str] = []
+    for model in models_to_try:
+        try:
+            return _gemini_generate_content(
+                payload,
+                model=model,
+                api_key=api_key,
+                timeout_sec=timeout_sec,
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            errors.append(f"{model}: HTTP {exc.code}: {detail}")
+            if exc.code != 404:
+                raise LLMIntentError(f"Gemini request failed: HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise LLMIntentError(f"Gemini request failed: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise LLMIntentError("Gemini request timed out") from exc
+    raise LLMIntentError(
+        "Gemini request failed: no configured/fallback model supports generateContent. "
+        + " | ".join(errors)
+    )
+
+
+def _gemini_generate_content(
+    payload: dict[str, Any],
+    *,
+    model: str,
+    api_key: str,
+    timeout_sec: float,
+) -> str:
+    request = urllib.request.Request(
+        _gemini_generate_content_url(model, api_key),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        return response.read().decode("utf-8")
+
+
+def _normalize_gemini_model(model: str) -> str:
+    return model.strip().removeprefix("models/")
+
+
+def _gemini_models_to_try(selected_model: str) -> list[str]:
+    candidates = [
+        _normalize_gemini_model(selected_model),
+        DEFAULT_GEMINI_MODEL,
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+    ]
+    output: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            output.append(candidate)
+    return output
+
+
 def _gemini_generate_content_url(model: str, api_key: str) -> str:
     base_url = os.environ.get(GEMINI_BASE_URL_ENV_VAR, DEFAULT_GEMINI_BASE_URL).rstrip("/")
-    encoded_model = urllib.parse.quote(model, safe="")
+    encoded_model = urllib.parse.quote(_normalize_gemini_model(model), safe="")
     query = urllib.parse.urlencode({"key": api_key})
     return f"{base_url}/models/{encoded_model}:generateContent?{query}"
 

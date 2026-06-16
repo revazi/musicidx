@@ -3,6 +3,7 @@ name = "musicidx-desktop"
 version = "0.1.0"
 description = "Cross-platform desktop wrapper for MusicIdx"
 authors = ["MusicIdx contributors"]
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]

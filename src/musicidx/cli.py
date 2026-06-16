@@ -8,6 +8,9 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -26,6 +29,8 @@ from musicidx.analyzer.embeddings import (
 )
 from musicidx.analyzer.essentia_models import (
     DEFAULT_MIN_SCORE,
+    TagAnalysisSummary,
+    available_model_specs,
     is_essentia_available,
     list_track_tags,
     model_manifest_status,
@@ -49,6 +54,12 @@ from musicidx.config import (
 from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
+from musicidx.resources import (
+    recommend_indexing_plan,
+    resolve_embedding_batch_size,
+    resolve_tag_batch_size,
+    resolve_worker_count,
+)
 from musicidx.scanner import scan_library
 from musicidx.search.evaluation import (
     aggregate_eval_results,
@@ -146,24 +157,50 @@ QuickOption = Annotated[
     typer.Option("--quick", help="Analyze only the first 120 seconds of each track."),
 ]
 WorkersOption = Annotated[
-    int,
-    typer.Option("--workers", min=1, max=32, help="Number of analysis worker threads."),
+    str,
+    typer.Option("--workers", help="Number of analysis worker threads, or 'auto'."),
 ]
 MinScoreOption = Annotated[
     float,
     typer.Option("--min-score", min=0.0, max=1.0, help="Minimum tag score to store."),
+]
+TagSubprocessBatchesOption = Annotated[
+    bool,
+    typer.Option(
+        "--subprocess-batches/--no-subprocess-batches",
+        help="Run tag analysis in child-process batches so TensorFlow memory is reclaimed.",
+    ),
+]
+TagBatchSizeOption = Annotated[
+    str,
+    typer.Option("--batch-size", help="Tracks per tag subprocess batch, or 'auto'."),
+]
+TrackIdFileOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--track-id-file",
+        help="Read tag-analysis track IDs from a JSON file.",
+        hidden=True,
+    ),
 ]
 EmbeddingModelOption = Annotated[
     str,
     typer.Option("--model", help="Sentence-transformers model name for profile embeddings."),
 ]
 BatchSizeOption = Annotated[
-    int,
-    typer.Option("--batch-size", min=1, max=512, help="Embedding batch size."),
+    str,
+    typer.Option("--batch-size", help="Embedding batch size, or 'auto'."),
 ]
 RefreshOption = Annotated[
     bool,
     typer.Option("--refresh", help="Recompute embeddings even when stored text is current."),
+]
+ResourceProfileOption = Annotated[
+    str,
+    typer.Option(
+        "--resource-profile",
+        help="Indexing resource profile: auto, low, balanced, full.",
+    ),
 ]
 SemanticModelOption = Annotated[
     str,
@@ -235,11 +272,180 @@ def _status(available: bool) -> str:
     return "available" if available else "missing"
 
 
+def _resolve_workers(value: str | int, *, kind: str, resource_profile: str) -> int:
+    try:
+        return resolve_worker_count(value, kind=kind, profile=resource_profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _resolve_embedding_batch_size(value: str | int, *, resource_profile: str) -> int:
+    try:
+        return resolve_embedding_batch_size(value, profile=resource_profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _resolve_tag_batch_size(value: str | int, *, resource_profile: str) -> int:
+    try:
+        return resolve_tag_batch_size(value, profile=resource_profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _select_tag_track_ids(
+    conn: sqlite3.Connection,
+    *,
+    track_id: str | None,
+    missing_only: bool,
+) -> list[str]:
+    clauses = ["missing_at IS NULL"]
+    params: list[Any] = []
+    if track_id is not None:
+        clauses.append("id = ?")
+        params.append(track_id)
+    if missing_only:
+        clauses.append("id NOT IN (SELECT track_id FROM track_tags WHERE source LIKE 'essentia:%')")
+    rows = conn.execute(
+        f"SELECT id FROM tracks WHERE {' AND '.join(clauses)} ORDER BY path",
+        params,
+    ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def _load_track_id_file(path: Path) -> list[str]:
+    try:
+        payload = json.loads(path.read_text())
+    except OSError as exc:
+        raise typer.BadParameter(f"could not read track ID file: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"invalid track ID file JSON: {exc}") from exc
+    if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+        raise typer.BadParameter("track ID file must contain a JSON array of strings")
+    return payload
+
+
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _json_from_output(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    try:
+        loaded = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        loaded = json.loads(stripped[start : end + 1])
+    if not isinstance(loaded, dict):
+        raise ValueError("expected JSON object")
+    return loaded
+
+
+def _summary_from_payload(payload: dict[str, Any]) -> TagAnalysisSummary:
+    return TagAnalysisSummary(
+        processed=int(payload.get("processed", 0)),
+        updated=int(payload.get("updated", 0)),
+        skipped=int(payload.get("skipped", 0)),
+        errors=int(payload.get("errors", 0)),
+        model_count=int(payload.get("model_count", 0)),
+    )
+
+
+def _record_tag_batch_error(conn: sqlite3.Connection, track_ids: list[str], error: str) -> None:
+    for track_id in track_ids:
+        conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))
+    conn.commit()
+
+
+def _run_tag_subprocess_batches(
+    *,
+    db_path: Path,
+    models_path: Path,
+    track_ids: list[str],
+    missing_only: bool,
+    min_score: float,
+    batch_size: int,
+) -> tuple[TagAnalysisSummary, int]:
+    summary = TagAnalysisSummary()
+    batches = _chunks(track_ids, batch_size)
+    if not batches:
+        try:
+            summary.model_count = len(available_model_specs(models_path))
+        except Exception:
+            summary.model_count = 0
+        return summary, 0
+
+    with tempfile.TemporaryDirectory(prefix="musicidx-tags-") as temp_dir:
+        temp_path = Path(temp_dir)
+        for batch_index, batch in enumerate(batches, start=1):
+            ids_path = temp_path / f"batch-{batch_index}.json"
+            ids_path.write_text(json.dumps(batch))
+            command = [
+                sys.executable,
+                "-m",
+                "musicidx.cli",
+                "analyze-tags",
+                "--db",
+                str(db_path),
+                "--models-path",
+                str(models_path),
+                "--min-score",
+                str(min_score),
+                "--workers",
+                "1",
+                "--no-subprocess-batches",
+                "--track-id-file",
+                str(ids_path),
+                "--json",
+            ]
+            if missing_only:
+                command.insert(-1, "--missing-only")
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                summary.errors += len(batch)
+                summary.model_count = max(summary.model_count, 0)
+                error = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+                conn = connect_db(db_path)
+                try:
+                    _record_tag_batch_error(
+                        conn,
+                        batch,
+                        f"tag subprocess batch failed: {error[:500]}",
+                    )
+                finally:
+                    conn.close()
+                continue
+            try:
+                child_summary = _summary_from_payload(_json_from_output(result.stdout))
+            except Exception as exc:
+                summary.errors += len(batch)
+                conn = connect_db(db_path)
+                try:
+                    _record_tag_batch_error(
+                        conn,
+                        batch,
+                        f"tag subprocess returned invalid JSON: {exc}",
+                    )
+                finally:
+                    conn.close()
+                continue
+            summary.processed += child_summary.processed
+            summary.updated += child_summary.updated
+            summary.skipped += child_summary.skipped
+            summary.errors += child_summary.errors
+            summary.model_count = max(summary.model_count, child_summary.model_count)
+    return summary, len(batches)
+
+
 @app.command("doctor")
 def doctor_command(json_output: JsonOption = False) -> None:
     """Check local dependencies and runtime capabilities."""
     ffprobe_path = resolve_executable("ffprobe", FFPROBE_PATH_ENV_VAR)
     fpcalc_path = resolve_executable("fpcalc", FPCALC_PATH_ENV_VAR)
+    resource_plan = recommend_indexing_plan()
     checks = [
         {
             "name": "SQLite",
@@ -308,9 +514,19 @@ def doctor_command(json_output: JsonOption = False) -> None:
             "status": _status(is_sentence_transformers_available()),
             "detail": "sentence-transformers module",
         },
+        {
+            "name": "Adaptive indexing",
+            "status": "available",
+            "detail": (
+                f"{resource_plan.effective_profile}: basic workers "
+                f"{resource_plan.basic_workers}, tag workers {resource_plan.tag_workers}, "
+                f"tag batch {resource_plan.tag_batch_size}, "
+                f"embed batch {resource_plan.embedding_batch_size}"
+            ),
+        },
     ]
 
-    payload = {"version": __version__, "checks": checks}
+    payload = {"version": __version__, "checks": checks, "resources": resource_plan.as_dict()}
     if json_output:
         _print_json(payload)
         return
@@ -326,6 +542,40 @@ def doctor_command(json_output: JsonOption = False) -> None:
             f"[{style}]{check['status']}[/{style}]",
             str(check["detail"]),
         )
+    console.print(table)
+
+
+@app.command("resources")
+def resources_command(
+    resource_profile: ResourceProfileOption = "auto",
+    json_output: JsonOption = False,
+) -> None:
+    """Show adaptive indexing recommendations for this machine."""
+    try:
+        plan = recommend_indexing_plan(resource_profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    payload = plan.as_dict()
+    if json_output:
+        _print_json(payload)
+        return
+
+    table = Table(title="Adaptive indexing resources")
+    table.add_column("Setting")
+    table.add_column("Value")
+    resources = payload["resources"]
+    table.add_row("Requested profile", payload["requested_profile"])
+    table.add_row("Effective profile", payload["effective_profile"])
+    table.add_row("CPU count", str(resources["cpu_count"]))
+    table.add_row("Total memory", f"{resources['total_memory_gb']} GB")
+    table.add_row("Basic workers", str(payload["basic_workers"]))
+    table.add_row("Tag workers", str(payload["tag_workers"]))
+    table.add_row("Embedding batch size", str(payload["embedding_batch_size"]))
+    table.add_row("Tag batch size", str(payload["tag_batch_size"]))
+    table.add_row("Reason", str(payload["reason"]))
+    if payload["warning"]:
+        table.add_row("Warning", str(payload["warning"]))
     console.print(table)
 
 
@@ -613,10 +863,13 @@ def analyze_basic_command(
     db: DbOption = None,
     track_id: TrackIdOption = None,
     quick: QuickOption = False,
-    workers: WorkersOption = 1,
+    workers: WorkersOption = "auto",
+    resource_profile: ResourceProfileOption = "auto",
     json_output: JsonOption = False,
 ) -> None:
     """Analyze basic audio features for scanned tracks."""
+    resolved_workers = _resolve_workers(workers, kind="basic", resource_profile=resource_profile)
+    resource_plan = recommend_indexing_plan(resource_profile)
     db_path = resolve_db_path(db)
     conn = connect_db(db_path)
     try:
@@ -625,7 +878,7 @@ def analyze_basic_command(
             conn,
             track_id=track_id,
             quick=quick,
-            workers=workers,
+            workers=resolved_workers,
         )
     finally:
         conn.close()
@@ -634,7 +887,10 @@ def analyze_basic_command(
         "db_path": str(db_path),
         "librosa_available": is_librosa_available(),
         "quick": quick,
-        "workers": workers,
+        "workers": resolved_workers,
+        "workers_requested": str(workers),
+        "resource_profile": resource_profile,
+        "resource_plan": resource_plan.as_dict(),
         **summary.as_dict(),
     }
     if json_output:
@@ -664,32 +920,71 @@ def analyze_tags_command(
     track_id: TrackIdOption = None,
     missing_only: TagMissingOnlyOption = False,
     min_score: MinScoreOption = DEFAULT_MIN_SCORE,
-    workers: WorkersOption = 1,
+    workers: WorkersOption = "auto",
+    resource_profile: ResourceProfileOption = "auto",
+    subprocess_batches: TagSubprocessBatchesOption = True,
+    batch_size: TagBatchSizeOption = "auto",
+    track_id_file: TrackIdFileOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Analyze ML mood/genre tags with local Essentia models."""
+    resolved_workers = _resolve_workers(workers, kind="tags", resource_profile=resource_profile)
+    resolved_batch_size = _resolve_tag_batch_size(batch_size, resource_profile=resource_profile)
+    resource_plan = recommend_indexing_plan(resource_profile)
     db_path = resolve_db_path(db)
     resolved_models_path = resolve_models_path(models_path)
-    conn = connect_db(db_path)
-    try:
-        init_db(conn)
-        summary = process_tags(
-            conn,
+    track_ids = _load_track_id_file(track_id_file) if track_id_file is not None else None
+    use_subprocess_batches = subprocess_batches and track_id_file is None
+    batches = 0
+
+    if use_subprocess_batches:
+        conn = connect_db(db_path)
+        try:
+            init_db(conn)
+            selected_track_ids = _select_tag_track_ids(
+                conn,
+                track_id=track_id,
+                missing_only=missing_only,
+            )
+        finally:
+            conn.close()
+        summary, batches = _run_tag_subprocess_batches(
+            db_path=db_path,
             models_path=resolved_models_path,
-            track_id=track_id,
+            track_ids=selected_track_ids,
             missing_only=missing_only,
             min_score=min_score,
-            workers=workers,
+            batch_size=resolved_batch_size,
         )
-    finally:
-        conn.close()
+    else:
+        conn = connect_db(db_path)
+        try:
+            init_db(conn)
+            summary = process_tags(
+                conn,
+                models_path=resolved_models_path,
+                track_id=track_id,
+                track_ids=track_ids,
+                missing_only=missing_only,
+                min_score=min_score,
+                workers=resolved_workers,
+            )
+        finally:
+            conn.close()
 
     payload = {
         "db_path": str(db_path),
         "models_path": str(resolved_models_path),
         "essentia_available": is_essentia_available(),
         "min_score": min_score,
-        "workers": workers,
+        "workers": resolved_workers,
+        "workers_requested": str(workers),
+        "resource_profile": resource_profile,
+        "resource_plan": resource_plan.as_dict(),
+        "subprocess_batches": use_subprocess_batches,
+        "batch_size": resolved_batch_size,
+        "batch_size_requested": str(batch_size),
+        "batches": batches,
         **summary.as_dict(),
     }
     if json_output:
@@ -707,7 +1002,16 @@ def analyze_tags_command(
     table = Table(title="ML tag analysis summary")
     table.add_column("Metric")
     table.add_column("Count", justify="right")
-    for key in ["processed", "updated", "skipped", "errors", "model_count"]:
+    for key in [
+        "processed",
+        "updated",
+        "skipped",
+        "errors",
+        "model_count",
+        "subprocess_batches",
+        "batch_size",
+        "batches",
+    ]:
         table.add_row(key, str(payload[key]))
     console.print(f"[bold]Database:[/bold] {db_path}")
     console.print(f"[bold]Models:[/bold] {resolved_models_path}")
@@ -752,11 +1056,17 @@ def embed_command(
     db: DbOption = None,
     track_id: TrackIdOption = None,
     model: EmbeddingModelOption = DEFAULT_EMBEDDING_MODEL,
-    batch_size: BatchSizeOption = 32,
+    batch_size: BatchSizeOption = "auto",
+    resource_profile: ResourceProfileOption = "auto",
     refresh: RefreshOption = False,
     json_output: JsonOption = False,
 ) -> None:
     """Embed enriched track profile text for semantic search."""
+    resolved_batch_size = _resolve_embedding_batch_size(
+        batch_size,
+        resource_profile=resource_profile,
+    )
+    resource_plan = recommend_indexing_plan(resource_profile)
     db_path = resolve_db_path(db)
     conn = connect_db(db_path)
     try:
@@ -765,7 +1075,7 @@ def embed_command(
             conn,
             track_id=track_id,
             model_name=model,
-            batch_size=batch_size,
+            batch_size=resolved_batch_size,
             refresh=refresh,
         )
     finally:
@@ -774,7 +1084,10 @@ def embed_command(
     payload = {
         "db_path": str(db_path),
         "sentence_transformers_available": is_sentence_transformers_available(),
-        "batch_size": batch_size,
+        "batch_size": resolved_batch_size,
+        "batch_size_requested": str(batch_size),
+        "resource_profile": resource_profile,
+        "resource_plan": resource_plan.as_dict(),
         "refresh": refresh,
         **summary.as_dict(),
     }

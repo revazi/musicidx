@@ -6,9 +6,11 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use tauri::{AppHandle, Emitter, Manager, Theme};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State, Theme};
 
 #[derive(Serialize)]
 struct DesktopState {
@@ -23,6 +25,13 @@ struct MusicidxOutput {
     success: bool,
     stdout: String,
     stderr: String,
+}
+
+type RunningChildren = Arc<Mutex<HashMap<String, Child>>>;
+
+#[derive(Clone, Default)]
+struct ProcessState {
+    children: RunningChildren,
 }
 
 #[derive(Clone, Serialize)]
@@ -91,6 +100,7 @@ fn run_musicidx(
 #[tauri::command]
 fn run_musicidx_stream(
     app: AppHandle,
+    processes: State<'_, ProcessState>,
     request_id: String,
     args: Vec<String>,
     cwd: Option<String>,
@@ -108,6 +118,8 @@ fn run_musicidx_stream(
     )?;
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let children = processes.children.clone();
 
     thread::spawn(move || {
         let mut child = match command.spawn() {
@@ -145,7 +157,24 @@ fn run_musicidx_stream(
             )
         });
 
-        let wait_result = child.wait();
+        if let Ok(mut guard) = children.lock() {
+            guard.insert(request_id.clone(), child);
+        } else {
+            emit_stream_event(
+                &app,
+                MusicidxStreamEvent {
+                    request_id,
+                    stream: String::from("stderr"),
+                    line: String::from("failed to track musicidx child process"),
+                    status: Some(-1),
+                    success: Some(false),
+                    done: true,
+                },
+            );
+            return;
+        }
+
+        let wait_result = wait_for_tracked_child(&children, &request_id);
 
         if let Some(handle) = stdout_thread {
             let _ = handle.join();
@@ -177,6 +206,80 @@ fn run_musicidx_stream(
     });
 
     Ok(())
+}
+
+#[tauri::command]
+fn cancel_musicidx(processes: State<'_, ProcessState>, request_id: String) -> Result<bool, String> {
+    let mut guard = processes
+        .children
+        .lock()
+        .map_err(|_| String::from("failed to lock process registry"))?;
+    let Some(child) = guard.get_mut(&request_id) else {
+        return Ok(false);
+    };
+    kill_process_tree(child).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
+    let pid = child.id().to_string();
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid, "/T", "/F"])
+        .status();
+    if status.is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+    child.kill()
+}
+
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
+    kill_unix_descendants(child.id());
+    child.kill()
+}
+
+#[cfg(unix)]
+fn kill_unix_descendants(pid: u32) {
+    let Ok(output) = Command::new("pgrep").args(["-P", &pid.to_string()]).output() else {
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let Ok(child_pid) = line.trim().parse::<u32>() else {
+            continue;
+        };
+        kill_unix_descendants(child_pid);
+        let _ = Command::new("kill")
+            .args(["-KILL", &child_pid.to_string()])
+            .status();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
+    child.kill()
+}
+
+fn wait_for_tracked_child(
+    children: &RunningChildren,
+    request_id: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    loop {
+        {
+            let mut guard = children
+                .lock()
+                .map_err(|_| std::io::Error::other("failed to lock process registry"))?;
+            let Some(child) = guard.get_mut(request_id) else {
+                return Err(std::io::Error::other("tracked process disappeared"));
+            };
+            if let Some(status) = child.try_wait()? {
+                guard.remove(request_id);
+                return Ok(status);
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn build_musicidx_command(
@@ -326,12 +429,14 @@ fn split_prefix_args(value: &str) -> Vec<String> {
 
 fn main() {
     tauri::Builder::default()
+        .manage(ProcessState::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             desktop_state,
             set_window_theme,
             run_musicidx,
-            run_musicidx_stream
+            run_musicidx_stream,
+            cancel_musicidx
         ])
         .run(tauri::generate_context!())
         .expect("error while running MusicIdx desktop app");
