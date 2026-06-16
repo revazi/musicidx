@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import shutil
+
+import pytest
+
 from musicidx.db import connect_db, init_db, utc_now
 from musicidx.scanner import scan_library
 
@@ -70,6 +74,42 @@ def test_scan_dry_run_does_not_write_rows(tmp_path):
 
         assert summary.added == 1
         assert _track_count(conn) == 0
+    finally:
+        conn.close()
+
+
+def test_scan_marks_tracks_missing_when_known_root_disappears(tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    (root / "a.mp3").write_bytes(b"audio-a")
+    (root / "b.flac").write_bytes(b"audio-b")
+
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        scan_library(root, conn)
+        shutil.rmtree(root)
+
+        summary = scan_library(root, conn)
+
+        assert summary.root_missing is True
+        assert summary.missing == 2
+        assert _missing_track_count(conn) == 2
+
+        second = scan_library(root, conn)
+        assert second.root_missing is True
+        assert second.missing == 0
+        assert _missing_track_count(conn) == 2
+    finally:
+        conn.close()
+
+
+def test_scan_unknown_missing_root_still_errors(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        with pytest.raises(FileNotFoundError):
+            scan_library(tmp_path / "not-indexed", conn)
     finally:
         conn.close()
 
@@ -166,6 +206,11 @@ def _seed_derived_outputs(conn, track_id: str) -> None:
 
 def _related_count(conn, table: str, track_id: str) -> int:
     row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE track_id = ?", (track_id,)).fetchone()
+    return int(row[0])
+
+
+def _missing_track_count(conn) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM tracks WHERE missing_at IS NOT NULL").fetchone()
     return int(row[0])
 
 

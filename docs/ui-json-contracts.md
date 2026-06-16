@@ -43,8 +43,10 @@ Expected use:
 
 - run each indexing step from a UI action or setup wizard
 - use adaptive low-impact defaults for one-click indexing
-- use `scan <folder> --json` for app-open background polling; when `added + modified + missing > 0`, run the remaining indexing steps
+- use `scan <folder> --json` for app-open background polling
+- run derived indexing steps when `added + modified > 0`; `missing > 0` only needs the scan result to update library state
 - treat `modified > 0` as requiring refresh; scan invalidates stale derived rows for changed files so `--missing-only` steps can rebuild them
+- handle `root_missing: true` as a warning state for a previously indexed folder that is currently unavailable; active tracks under that root have been marked missing
 - display command summaries and errors
 - show runtime diagnostics from `duration_sec`, `peak_memory_mb`, `child_peak_memory_mb`, and `diagnostics`
 - keep long-running steps cancellable at the process/process-tree level
@@ -59,10 +61,14 @@ Common indexing diagnostics fields:
 | `diagnostics.started_at` / `finished_at` | UTC timestamps for the command. |
 | `diagnostics.peak_memory_source` | Platform API used for memory measurement. |
 | `chunked` / `chunk_sec` | Basic-analysis chunking settings when `analyze-basic --chunked` is used. |
+| `root_missing` | Scan-only flag. `true` means the scanned root was known from a previous scan but is currently unavailable, so active tracks under it were marked missing. |
 
-### Failed/corrupt tracks
+### Missing and failed tracks
 
 ```bash
+musicidx missing --json
+musicidx prune-missing --track-id <id> --json
+musicidx prune-missing --all --json
 musicidx failed --json
 musicidx failed --quarantined-only --json
 musicidx retry-failed --track-id <id> --json
@@ -71,9 +77,13 @@ musicidx retry-failed --all --json
 
 Expected use:
 
+- show tracks marked missing after file removal or unavailable indexed roots
+- allow a user to prune missing database rows without deleting music files
 - show tracks skipped because of repeated decode/indexing failures
 - allow a user to retry a fixed/replaced file
 - prevent corrupt files from being retried on every indexing run
+
+`missing --json` returns `{ db_path, count, missing }`; each item includes `id`, `path`, optional metadata, `root_path`, and `missing_at`. `prune-missing` returns `{ db_path, pruned, track_id }`.
 
 ### Track inspection
 

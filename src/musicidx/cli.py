@@ -55,6 +55,7 @@ from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
 from musicidx.failures import list_failed_tracks, record_track_error, reset_failed_tracks
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
+from musicidx.missing import list_missing_tracks, prune_missing_tracks
 from musicidx.resources import (
     RuntimeTimer,
     recommend_indexing_plan,
@@ -274,6 +275,10 @@ FailedQuarantinedOnlyOption = Annotated[
 RetryAllOption = Annotated[
     bool,
     typer.Option("--all", help="Reset all failed/quarantined tracks."),
+]
+PruneMissingAllOption = Annotated[
+    bool,
+    typer.Option("--all", help="Prune all tracks marked missing from disk."),
 ]
 ExportFormatOption = Annotated[
     str,
@@ -747,6 +752,75 @@ def retry_failed_command(
         _print_json(payload)
         return
     console.print(f"[green]Reset failed track state:[/green] {reset_count}")
+
+
+@app.command("missing")
+def missing_command(
+    db: DbOption = None,
+    json_output: JsonOption = False,
+) -> None:
+    """List tracks marked missing from disk."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        missing_tracks = list_missing_tracks(conn)
+    finally:
+        conn.close()
+
+    payload = {
+        "db_path": str(db_path),
+        "count": len(missing_tracks),
+        "missing": [track.as_dict() for track in missing_tracks],
+    }
+    if json_output:
+        _print_json(payload)
+        return
+
+    if not missing_tracks:
+        console.print("[green]No missing tracks.[/green]")
+        return
+
+    table = Table(title="Missing tracks")
+    table.add_column("Missing at")
+    table.add_column("Artist")
+    table.add_column("Title")
+    table.add_column("Path")
+    table.add_column("Root")
+    for track in missing_tracks:
+        table.add_row(
+            track.missing_at,
+            track.artist or "",
+            track.title or "",
+            track.path,
+            track.root_path or "",
+        )
+    console.print(table)
+
+
+@app.command("prune-missing")
+def prune_missing_command(
+    db: DbOption = None,
+    track_id: TrackIdOption = None,
+    all_tracks: PruneMissingAllOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Delete missing-track database rows only; never delete files."""
+    if track_id is None and not all_tracks:
+        raise typer.BadParameter("pass --track-id <id> or --all")
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        pruned_count = prune_missing_tracks(conn, track_id=track_id if not all_tracks else None)
+    finally:
+        conn.close()
+
+    payload = {"db_path": str(db_path), "pruned": pruned_count, "track_id": track_id}
+    if json_output:
+        _print_json(payload)
+        return
+    console.print(f"[green]Pruned missing track rows:[/green] {pruned_count}")
 
 
 @app.command("scan")

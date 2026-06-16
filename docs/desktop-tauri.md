@@ -81,6 +81,8 @@ The Tauri UI can:
 - choose DB/model/export paths where useful
 - run a cancellable low-impact/adaptive indexing pipeline from a floating bottom-left icon button
 - poll the configured music folder at the user-selected interval while the app is open and auto-index detected changes
+- mark removed files missing immediately without launching heavy derived-indexing steps
+- handle a previously indexed music folder disappearing by marking its active tracks missing instead of crashing the watcher
 - refresh derived metadata/fingerprints/features/tags/profiles/embeddings when an existing file is modified
 - keep indexing setup and individual scan/metadata/fingerprint/basic/tag/embed actions in Settings
 - show manual and background pipeline progress by step, runtime, counts, and memory diagnostics in a floating progress panel with a Cancel button
@@ -88,7 +90,9 @@ The Tauri UI can:
 - choose an indexing resource profile: auto, low, balanced, or full
 - run quick basic audio analysis in adaptive chunks to lower peak RAM
 - run ML tag analysis in adaptive subprocess batches to lower peak RAM
-- inspect failed/quarantined tracks and reset them for retry from advanced indexing actions
+- inspect missing and failed/quarantined tracks from advanced indexing actions
+- prune all missing database rows from advanced indexing actions after confirmation; this never deletes music files
+- reset failed/quarantined tracks for retry from advanced indexing actions
 - stream command stdout/stderr into an expandable live/raw output panel
 - parse natural-language intent
 - run concise JSON search with explanations
@@ -112,6 +116,7 @@ MUSICIDX_FPCALC_PATH
 semantic/embedding model
 indexing resource profile
 background auto-indexing toggle
+background check interval
 GEMINI_API_KEY
 LLM provider/model
 ```

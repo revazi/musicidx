@@ -18,6 +18,7 @@ import {
   Tags,
   ThumbsDown,
   ThumbsUp,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -120,6 +121,7 @@ type IndexCommandPayload = {
   modified?: number;
   missing?: number;
   total_seen?: number;
+  root_missing?: boolean;
   batches?: number;
   batch_size?: number;
   chunked?: boolean;
@@ -383,8 +385,28 @@ export default function App() {
       const scanPayload = await runJsonCommand<IndexCommandPayload>(scanStep.args());
       const checkedAt = formatClock(new Date());
       const changeCount = scanChangeCount(scanPayload);
+      const needsDerivedIndexing = scanNeedsDerivedIndexing(scanPayload);
       if (changeCount <= 0) {
-        setBackgroundStatus(`No changes · checked ${checkedAt}`);
+        setBackgroundStatus(
+          scanPayload.root_missing
+            ? `Music folder not found · no active tracks to mark missing · checked ${checkedAt}`
+            : `No changes · checked ${checkedAt}`,
+        );
+        if (scanPayload.root_missing) {
+          updateStatus("Music folder not found", true);
+        }
+        return;
+      }
+      if (!needsDerivedIndexing) {
+        const message = scanPayload.root_missing
+          ? `Music folder not found · ${describeScanChanges(scanPayload)} marked missing · checked ${checkedAt}`
+          : `${describeScanChanges(scanPayload)} · library state updated · checked ${checkedAt}`;
+        setBackgroundStatus(message);
+        setPipelineSummaries([summarizeIndexStep(scanStep, scanPayload)]);
+        updateStatus(
+          scanPayload.root_missing ? "Music folder not found; tracks marked missing" : "Library removals updated",
+          Boolean(scanPayload.root_missing),
+        );
         return;
       }
 
@@ -514,6 +536,17 @@ export default function App() {
     const args = ["eval", "eval/search_queries.json", "--limit", String(normalizedLimit()), "--json"];
     appendCommonSearchArgs(args);
     await runJsonCommand(args);
+  }
+
+  async function pruneAllMissing() {
+    const confirmed = window.confirm(
+      "Prune all tracks marked missing from the database? This does not delete music files.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    await runJsonCommand(["prune-missing", "--all", "--json"]);
+    updateStatus("Pruned missing track rows");
   }
 
   async function exportPlaylist() {
@@ -834,6 +867,10 @@ export default function App() {
                     <Activity className="h-4 w-4" />
                     Failed tracks
                   </Button>
+                  <Button variant="outline" disabled={busy} onClick={() => runJsonCommand(["missing", "--json"])}>
+                    <FolderOpen className="h-4 w-4" />
+                    Missing tracks
+                  </Button>
                   <Button
                     variant="outline"
                     disabled={busy}
@@ -841,6 +878,10 @@ export default function App() {
                   >
                     <CheckCircle2 className="h-4 w-4" />
                     Retry all failed
+                  </Button>
+                  <Button variant="outline" disabled={busy} onClick={pruneAllMissing}>
+                    <Trash2 className="h-4 w-4" />
+                    Prune all missing
                   </Button>
                 </div>
               ) : null}
@@ -1400,6 +1441,10 @@ function formatCount(label: string, value: number | undefined): string | null {
 
 function scanChangeCount(payload: IndexCommandPayload): number {
   return (payload.added ?? 0) + (payload.modified ?? 0) + (payload.missing ?? 0);
+}
+
+function scanNeedsDerivedIndexing(payload: IndexCommandPayload): boolean {
+  return (payload.added ?? 0) > 0 || (payload.modified ?? 0) > 0;
 }
 
 function describeScanChanges(payload: IndexCommandPayload): string {

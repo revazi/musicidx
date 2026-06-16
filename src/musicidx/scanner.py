@@ -39,6 +39,7 @@ class ScanSummary:
     skipped: int = 0
     errors: int = 0
     dry_run: bool = False
+    root_missing: bool = False
 
     @property
     def total_seen(self) -> int:
@@ -65,14 +66,27 @@ def scan_library(
     with ``missing_at`` instead of being deleted.
     """
     root = root_path.expanduser().resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"Directory does not exist: {root}")
-    if not root.is_dir():
-        raise NotADirectoryError(f"Not a directory: {root}")
-
     summary = ScanSummary(root_path=str(root), dry_run=dry_run)
     now = utc_now()
     root_id = _get_library_root_id(conn, root)
+
+    if not root.exists():
+        if root_id is None:
+            raise FileNotFoundError(f"Directory does not exist: {root}")
+        summary.root_missing = True
+        try:
+            _mark_missing_tracks(conn, root_id, set(), now, summary, dry_run=dry_run)
+            if not dry_run:
+                conn.execute("UPDATE library_roots SET updated_at = ? WHERE id = ?", (now, root_id))
+                conn.commit()
+        except Exception:
+            if not dry_run:
+                conn.rollback()
+            raise
+        return summary
+
+    if not root.is_dir():
+        raise NotADirectoryError(f"Not a directory: {root}")
 
     if root_id is None and not dry_run:
         root_id = _insert_library_root(conn, root, now)

@@ -185,7 +185,7 @@ DB path:           optional; defaults to ./musicidx.sqlite
 Models path:       optional; defaults to ./.musicidx-models
 ```
 
-When a music folder is configured, the desktop app checks for changes while it is open. The interval is configurable in Settings, defaults to 1 minute for testing, and can be changed to 5/10/30/60 minutes. If files were added/modified/removed, it runs the same safe adaptive indexing pipeline in the background and shows progress with a Cancel button. Modified files invalidate stale metadata, fingerprints, audio features, tags, profiles, and embeddings so they are refreshed by the pipeline.
+When a music folder is configured, the desktop app checks for changes while it is open. The interval is configurable in Settings, defaults to 1 minute for testing, and can be changed to 5/10/30/60 minutes. If files were added or modified, it runs the same safe adaptive indexing pipeline in the background and shows progress with a Cancel button. Removed files are marked missing immediately; if a previously indexed music folder disappears, its active tracks are marked missing instead of crashing the watcher. Modified files invalidate stale metadata, fingerprints, audio features, tags, profiles, and embeddings so they are refreshed by the pipeline.
 
 More desktop notes: [`docs/desktop-tauri.md`](docs/desktop-tauri.md).
 
@@ -244,16 +244,19 @@ musicidx analyze-tags --missing-only --workers auto --resource-profile auto --su
 musicidx embed --batch-size auto --resource-profile auto --json
 ```
 
-Failed/corrupt tracks:
+Missing/failed tracks:
 
 ```bash
+musicidx missing --json
+musicidx prune-missing --track-id <track-id> --json
+musicidx prune-missing --all --json
 musicidx failed
 musicidx failed --json
 musicidx retry-failed --track-id <track-id>
 musicidx retry-failed --all
 ```
 
-Tracks are quarantined after repeated failures and skipped by default in indexing commands. If you replace/fix a file, run `retry-failed` or rescan after the file metadata changes.
+Missing tracks are files that were indexed before but are no longer present. `prune-missing` deletes database rows only; it never deletes music files. Failed/corrupt tracks are quarantined after repeated failures and skipped by default in indexing commands. If you replace/fix a file, run `retry-failed` or rescan after the file metadata changes.
 
 Search:
 
