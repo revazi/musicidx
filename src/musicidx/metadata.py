@@ -12,6 +12,7 @@ from typing import Any
 
 from musicidx.config import FFPROBE_PATH_ENV_VAR, resolve_executable
 from musicidx.db import utc_now
+from musicidx.failures import clear_track_failure, record_track_error
 
 TAG_ALIASES = {
     "title": ["title", "tracktitle", "name"],
@@ -170,7 +171,7 @@ def process_metadata(
         path = Path(row["path"])
         if not path.exists():
             summary.skipped += 1
-            _record_track_error(conn, row["id"], "file is missing on disk")
+            record_track_error(conn, row["id"], "file is missing on disk")
             continue
 
         summary.processed += 1
@@ -181,7 +182,7 @@ def process_metadata(
             summary.updated += 1
         except MetadataExtractionError as exc:
             summary.errors += 1
-            _record_track_error(conn, row["id"], str(exc))
+            record_track_error(conn, row["id"], str(exc))
 
     conn.commit()
     return summary
@@ -232,7 +233,7 @@ def save_track_metadata(
         UPDATE tracks
         SET title = ?, artist = ?, album = ?, album_artist = ?, genre = ?, date = ?,
             track_number = ?, disc_number = ?, duration_sec = ?, codec = ?, sample_rate = ?,
-            bit_rate = ?, channels = ?, indexed_at = ?, last_error = NULL
+            bit_rate = ?, channels = ?, indexed_at = ?
         WHERE id = ?
         """,
         (
@@ -264,6 +265,7 @@ def save_track_metadata(
         """,
         (track_id, profile_text, profile_json, now),
     )
+    clear_track_failure(conn, track_id)
     conn.execute("DELETE FROM tracks_fts WHERE track_id = ?", (track_id,))
     conn.execute(
         """
@@ -330,7 +332,7 @@ def _select_tracks_for_metadata(
     track_id: str | None,
     missing_only: bool,
 ) -> list[sqlite3.Row]:
-    clauses = ["missing_at IS NULL"]
+    clauses = ["missing_at IS NULL", "quarantined_at IS NULL"]
     params: list[Any] = []
     if track_id is not None:
         clauses.append("id = ?")
@@ -339,8 +341,8 @@ def _select_tracks_for_metadata(
         clauses.append(
             """
             (
-                title IS NULL
-                OR duration_sec IS NULL
+                duration_sec IS NULL
+                OR codec IS NULL
                 OR id NOT IN (SELECT track_id FROM track_profiles)
             )
             """
@@ -350,10 +352,6 @@ def _select_tracks_for_metadata(
         f"SELECT id, path FROM tracks WHERE {' AND '.join(clauses)} ORDER BY path",
         params,
     ).fetchall()
-
-
-def _record_track_error(conn: sqlite3.Connection, track_id: str, error: str) -> None:
-    conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))
 
 
 def _collect_tags(format_info: dict[str, Any], audio_stream: dict[str, Any]) -> dict[str, str]:

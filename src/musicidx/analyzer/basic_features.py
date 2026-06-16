@@ -2,26 +2,53 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import math
+import os
 import sqlite3
+import sys
+import tempfile
+import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from musicidx.db import utc_now
+from musicidx.failures import clear_track_failure, record_track_error
 from musicidx.profiles import rebuild_track_profile
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 DEFAULT_SAMPLE_RATE = 22050
 QUICK_DURATION_SEC = 120.0
+DEFAULT_CHUNK_SEC = 60.0
 KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+DECODE_CAPTURE_MAX_CHARS = 2000
+_DECODE_CAPTURE_LOCK = threading.Lock()
 
 
 class AudioAnalysisError(RuntimeError):
     """Raised when basic audio analysis cannot be completed."""
+
+
+class _CapturedDecodeError(RuntimeError):
+    """Internal wrapper carrying captured decoder diagnostics."""
+
+    def __init__(
+        self,
+        original: Exception,
+        *,
+        warning_messages: list[str],
+        stderr_text: str,
+    ) -> None:
+        super().__init__(str(original))
+        self.original = original
+        self.warning_messages = warning_messages
+        self.stderr_text = stderr_text
 
 
 @dataclass(slots=True)
@@ -69,11 +96,184 @@ def is_librosa_available() -> bool:
     return importlib.util.find_spec("librosa") is not None
 
 
+def _load_audio_quietly(
+    librosa: Any,
+    path: Path,
+    *,
+    sample_rate: int,
+    quick: bool,
+    offset_sec: float = 0.0,
+    duration_sec: float | None = None,
+) -> tuple[Any, int]:
+    """Load audio while capturing noisy decoder warnings/stderr.
+
+    Some backends print MPEG/header diagnostics directly to stderr and librosa
+    emits fallback/deprecation warnings before eventually raising a decode error.
+    Capturing here keeps CLI/Tauri logs concise while preserving a useful error
+    message in the DB failure state.
+    """
+    with _DECODE_CAPTURE_LOCK:
+        return _decode_with_captured_stderr(
+            librosa,
+            path,
+            sample_rate=sample_rate,
+            quick=quick,
+            offset_sec=offset_sec,
+            duration_sec=duration_sec,
+        )
+
+
+def _decode_with_captured_stderr(
+    librosa: Any,
+    path: Path,
+    *,
+    sample_rate: int,
+    quick: bool,
+    offset_sec: float,
+    duration_sec: float | None,
+) -> tuple[Any, int]:
+    try:
+        stderr_fd = sys.stderr.fileno()
+    except (AttributeError, OSError, io.UnsupportedOperation):
+        return _decode_with_python_stderr_capture(
+            librosa,
+            path,
+            sample_rate=sample_rate,
+            quick=quick,
+            offset_sec=offset_sec,
+            duration_sec=duration_sec,
+        )
+
+    captured_warnings: list[warnings.WarningMessage] = []
+    stderr_file = tempfile.TemporaryFile(mode="w+b")
+    saved_stderr_fd = os.dup(stderr_fd)
+    try:
+        sys.stderr.flush()
+        os.dup2(stderr_file.fileno(), stderr_fd)
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = librosa.load(
+                    str(path),
+                    sr=sample_rate,
+                    mono=True,
+                    offset=offset_sec,
+                    duration=(
+                        duration_sec
+                        if duration_sec is not None
+                        else QUICK_DURATION_SEC if quick else None
+                    ),
+                )
+                captured_warnings = list(caught)
+        except Exception as exc:
+            captured_warnings = list(locals().get("caught", []))
+            raise _CapturedDecodeError(
+                exc,
+                warning_messages=_warning_messages(captured_warnings),
+                stderr_text=_read_captured_stderr(stderr_file),
+            ) from exc
+        return result
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_stderr_fd, stderr_fd)
+        os.close(saved_stderr_fd)
+        stderr_file.close()
+
+
+def _decode_with_python_stderr_capture(
+    librosa: Any,
+    path: Path,
+    *,
+    sample_rate: int,
+    quick: bool,
+    offset_sec: float,
+    duration_sec: float | None,
+) -> tuple[Any, int]:
+    stderr_buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr_buffer):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                return librosa.load(
+                    str(path),
+                    sr=sample_rate,
+                    mono=True,
+                    offset=offset_sec,
+                    duration=(
+                        duration_sec
+                        if duration_sec is not None
+                        else QUICK_DURATION_SEC if quick else None
+                    ),
+                )
+    except Exception as exc:
+        raise _CapturedDecodeError(
+            exc,
+            warning_messages=_warning_messages(list(locals().get("caught", []))),
+            stderr_text=stderr_buffer.getvalue(),
+        ) from exc
+
+
+def _read_captured_stderr(stderr_file: Any) -> str:
+    try:
+        stderr_file.flush()
+        stderr_file.seek(0)
+        return stderr_file.read(DECODE_CAPTURE_MAX_CHARS).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _warning_messages(captured_warnings: list[warnings.WarningMessage]) -> list[str]:
+    return [str(warning.message).strip() for warning in captured_warnings if warning.message]
+
+
+def _decode_error_message(error: _CapturedDecodeError) -> str:
+    details = _summarize_decoder_details(
+        str(error.original).strip(),
+        error.stderr_text,
+        error.warning_messages,
+    )
+    return f"failed to decode audio: {details}"
+
+
+def _summarize_decoder_details(
+    original_error: str,
+    stderr_text: str,
+    warning_messages: list[str],
+) -> str:
+    parts: list[str] = []
+    if original_error:
+        parts.append(original_error)
+    stderr_summary = _summarize_lines(stderr_text)
+    if stderr_summary:
+        parts.append(stderr_summary)
+    warning_summary = _summarize_lines("\n".join(warning_messages), max_lines=2)
+    if warning_summary:
+        parts.append(warning_summary)
+    return "; ".join(parts)[:DECODE_CAPTURE_MAX_CHARS] or "decoder returned no details"
+
+
+def _summarize_lines(text: str, *, max_lines: int = 4) -> str:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.strip().split())
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+        if len(lines) >= max_lines:
+            break
+    return " | ".join(lines)
+
+
 def analyze_basic_features(
     path: Path,
     *,
     quick: bool = False,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
+    chunked: bool = False,
+    chunk_sec: float = DEFAULT_CHUNK_SEC,
+    max_chunks: int | None = None,
 ) -> AudioFeatures:
     """Analyze a track and return deterministic audio descriptors."""
     try:
@@ -82,16 +282,119 @@ def analyze_basic_features(
     except ImportError as exc:
         raise AudioAnalysisError("librosa/numpy are not installed") from exc
 
-    try:
-        y, sr = librosa.load(
-            str(path),
-            sr=sample_rate,
-            mono=True,
-            duration=QUICK_DURATION_SEC if quick else None,
+    if chunked:
+        return _analyze_basic_features_chunked(
+            librosa,
+            np,
+            path,
+            quick=quick,
+            sample_rate=sample_rate,
+            chunk_sec=chunk_sec,
+            max_chunks=max_chunks,
         )
-    except Exception as exc:  # pragma: no cover - exact decoder exceptions vary by backend
-        raise AudioAnalysisError(f"failed to decode audio: {exc}") from exc
 
+    try:
+        y, sr = _load_audio_quietly(
+            librosa,
+            path,
+            sample_rate=sample_rate,
+            quick=quick,
+        )
+    except _CapturedDecodeError as exc:  # pragma: no cover - decoder exceptions vary
+        raise AudioAnalysisError(_decode_error_message(exc)) from exc.original
+
+    return _features_from_audio(
+        librosa,
+        np,
+        y,
+        sr,
+        quick=quick,
+        raw_extra={"chunked": False},
+    )
+
+
+def _analyze_basic_features_chunked(
+    librosa: Any,
+    np: Any,
+    path: Path,
+    *,
+    quick: bool,
+    sample_rate: int,
+    chunk_sec: float,
+    max_chunks: int | None,
+) -> AudioFeatures:
+    if chunk_sec <= 0:
+        raise AudioAnalysisError("chunk_sec must be greater than zero")
+    if max_chunks is not None and max_chunks <= 0:
+        raise AudioAnalysisError("max_chunks must be greater than zero")
+
+    total_duration = _audio_duration_sec(librosa, path)
+    if total_duration is None or total_duration <= 0:
+        raise AudioAnalysisError("could not determine audio duration for chunked analysis")
+
+    effective_duration = min(total_duration, QUICK_DURATION_SEC) if quick else total_duration
+    chunks = _chunk_windows(effective_duration, chunk_sec=chunk_sec, max_chunks=max_chunks)
+    if not chunks:
+        raise AudioAnalysisError("no audio chunks selected for analysis")
+
+    features: list[AudioFeatures] = []
+    weights: list[float] = []
+    for offset_sec, duration_sec in chunks:
+        try:
+            y, sr = _load_audio_quietly(
+                librosa,
+                path,
+                sample_rate=sample_rate,
+                quick=False,
+                offset_sec=offset_sec,
+                duration_sec=duration_sec,
+            )
+        except _CapturedDecodeError as exc:  # pragma: no cover - decoder exceptions vary
+            raise AudioAnalysisError(_decode_error_message(exc)) from exc.original
+        if y is None or len(y) == 0:
+            continue
+        features.append(
+            _features_from_audio(
+                librosa,
+                np,
+                y,
+                sr,
+                quick=False,
+                raw_extra={
+                    "chunked": True,
+                    "chunk_offset_sec": _round_float(offset_sec),
+                    "chunk_duration_sec": _round_float(duration_sec),
+                },
+            )
+        )
+        weights.append(max(float(len(y)), 1.0))
+
+    if not features:
+        raise AudioAnalysisError("decoded audio chunks were empty")
+
+    return _aggregate_chunk_features(
+        np,
+        features,
+        weights,
+        quick=quick,
+        total_duration=total_duration,
+        effective_duration=effective_duration,
+        chunk_sec=chunk_sec,
+        selected_chunks=len(chunks),
+        analyzed_chunks=len(features),
+        max_chunks=max_chunks,
+    )
+
+
+def _features_from_audio(
+    librosa: Any,
+    np: Any,
+    y: Any,
+    sr: int,
+    *,
+    quick: bool,
+    raw_extra: dict[str, Any] | None = None,
+) -> AudioFeatures:
     if y is None or len(y) == 0:
         raise AudioAnalysisError("decoded audio was empty")
 
@@ -142,6 +445,8 @@ def analyze_basic_features(
         "onset_strength_mean": _round_float(onset_mean),
         "chroma_profile": chroma_profile,
     }
+    if raw_extra:
+        raw_features.update(raw_extra)
 
     return AudioFeatures(
         bpm=_round_optional(bpm),
@@ -162,6 +467,171 @@ def analyze_basic_features(
         chroma_profile=chroma_profile,
         raw_features=raw_features,
     )
+
+
+def _audio_duration_sec(librosa: Any, path: Path) -> float | None:
+    with _DECODE_CAPTURE_LOCK:
+        try:
+            stderr_fd = sys.stderr.fileno()
+        except (AttributeError, OSError, io.UnsupportedOperation):
+            return _audio_duration_sec_python_capture(librosa, path)
+        return _audio_duration_sec_fd_capture(librosa, path, stderr_fd=stderr_fd)
+
+
+def _audio_duration_sec_fd_capture(librosa: Any, path: Path, *, stderr_fd: int) -> float | None:
+    stderr_file = tempfile.TemporaryFile(mode="w+b")
+    saved_stderr_fd = os.dup(stderr_fd)
+    try:
+        sys.stderr.flush()
+        os.dup2(stderr_file.fileno(), stderr_fd)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _call_get_duration(librosa, path)
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_stderr_fd, stderr_fd)
+        os.close(saved_stderr_fd)
+        stderr_file.close()
+
+
+def _audio_duration_sec_python_capture(librosa: Any, path: Path) -> float | None:
+    with contextlib.redirect_stderr(io.StringIO()):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _call_get_duration(librosa, path)
+
+
+def _call_get_duration(librosa: Any, path: Path) -> float | None:
+    try:
+        return float(librosa.get_duration(path=str(path)))
+    except TypeError:
+        try:
+            return float(librosa.get_duration(filename=str(path)))
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _chunk_windows(
+    duration_sec: float,
+    *,
+    chunk_sec: float,
+    max_chunks: int | None,
+) -> list[tuple[float, float]]:
+    chunk_count = max(1, math.ceil(duration_sec / chunk_sec))
+    if max_chunks is None or max_chunks >= chunk_count:
+        indexes = list(range(chunk_count))
+    elif max_chunks == 1:
+        indexes = [0]
+    else:
+        indexes = sorted(
+            {
+                round(index * (chunk_count - 1) / (max_chunks - 1))
+                for index in range(max_chunks)
+            }
+        )
+    windows: list[tuple[float, float]] = []
+    for index in indexes:
+        offset = index * chunk_sec
+        remaining = max(0.0, duration_sec - offset)
+        if remaining <= 0:
+            continue
+        windows.append((offset, min(chunk_sec, remaining)))
+    return windows
+
+
+def _aggregate_chunk_features(
+    np: Any,
+    features: list[AudioFeatures],
+    weights: list[float],
+    *,
+    quick: bool,
+    total_duration: float,
+    effective_duration: float,
+    chunk_sec: float,
+    selected_chunks: int,
+    analyzed_chunks: int,
+    max_chunks: int | None,
+) -> AudioFeatures:
+    chroma_profile = _weighted_vector(np, [item.chroma_profile for item in features], weights)
+    key_name, mode = estimate_key_mode(chroma_profile)
+    raw_features = {
+        "analysis_version": ANALYSIS_VERSION,
+        "quick": quick,
+        "chunked": True,
+        "chunk_sec": _round_float(chunk_sec),
+        "max_chunks": max_chunks,
+        "selected_chunks": selected_chunks,
+        "analyzed_chunks": analyzed_chunks,
+        "total_duration_sec": _round_float(total_duration),
+        "effective_duration_sec": _round_float(effective_duration),
+        "chroma_profile": chroma_profile,
+    }
+    return AudioFeatures(
+        bpm=_round_optional(_weighted_optional([item.bpm for item in features], weights)),
+        key_name=key_name,
+        mode=mode,
+        dynamic_range=_round_optional(
+            _weighted_optional([item.dynamic_range for item in features], weights)
+        ),
+        energy=_round_optional(_weighted_optional([item.energy for item in features], weights)),
+        danceability=_round_optional(
+            _weighted_optional([item.danceability for item in features], weights)
+        ),
+        aggression=_round_optional(
+            _weighted_optional([item.aggression for item in features], weights)
+        ),
+        brightness=_round_optional(
+            _weighted_optional([item.brightness for item in features], weights)
+        ),
+        spectral_centroid_mean=_round_optional(
+            _weighted_optional([item.spectral_centroid_mean for item in features], weights)
+        ),
+        spectral_centroid_std=_round_optional(
+            _weighted_optional([item.spectral_centroid_std for item in features], weights)
+        ),
+        spectral_flatness_mean=_round_optional(
+            _weighted_optional([item.spectral_flatness_mean for item in features], weights)
+        ),
+        spectral_rolloff_mean=_round_optional(
+            _weighted_optional([item.spectral_rolloff_mean for item in features], weights)
+        ),
+        zero_crossing_rate_mean=_round_optional(
+            _weighted_optional([item.zero_crossing_rate_mean for item in features], weights)
+        ),
+        mfcc_mean=_weighted_vector(np, [item.mfcc_mean for item in features], weights),
+        mfcc_std=_weighted_vector(np, [item.mfcc_std for item in features], weights),
+        chroma_profile=chroma_profile,
+        raw_features=raw_features,
+    )
+
+
+def _weighted_optional(values: list[float | None], weights: list[float]) -> float | None:
+    pairs = [
+        (value, weight)
+        for value, weight in zip(values, weights, strict=True)
+        if value is not None
+    ]
+    total_weight = sum(weight for _, weight in pairs)
+    if total_weight <= 0:
+        return None
+    return sum(float(value) * weight for value, weight in pairs if value is not None) / total_weight
+
+
+def _weighted_vector(np: Any, vectors: list[list[float]], weights: list[float]) -> list[float]:
+    usable = [(vector, weight) for vector, weight in zip(vectors, weights, strict=True) if vector]
+    if not usable:
+        return []
+    min_len = min(len(vector) for vector, _ in usable)
+    if min_len <= 0:
+        return []
+    array = np.asarray([vector[:min_len] for vector, _ in usable], dtype=float)
+    weight_array = np.asarray([weight for _, weight in usable], dtype=float)
+    if float(weight_array.sum()) <= 0:
+        return [_round_float(value) for value in array.mean(axis=0).tolist()]
+    weighted = np.average(array, axis=0, weights=weight_array)
+    return [_round_float(value) for value in weighted.tolist()]
 
 
 def estimate_key_mode(chroma_profile: list[float]) -> tuple[str | None, str | None]:
@@ -201,6 +671,9 @@ def process_basic_analysis(
     track_id: str | None = None,
     quick: bool = False,
     workers: int = 1,
+    chunked: bool = False,
+    chunk_sec: float = DEFAULT_CHUNK_SEC,
+    max_chunks: int | None = None,
 ) -> BasicAnalysisSummary:
     """Analyze selected tracks and persist feature rows."""
     summary = BasicAnalysisSummary()
@@ -208,7 +681,15 @@ def process_basic_analysis(
 
     if workers <= 1:
         for job in jobs:
-            _process_one_job(conn, job, summary, quick=quick)
+            _process_one_job(
+                conn,
+                job,
+                summary,
+                quick=quick,
+                chunked=chunked,
+                chunk_sec=chunk_sec,
+                max_chunks=max_chunks,
+            )
         conn.commit()
         return summary
 
@@ -220,13 +701,20 @@ def process_basic_analysis(
         path = Path(job["path"])
         if not path.exists():
             summary.skipped += 1
-            _record_track_error(conn, job["id"], "file is missing on disk")
+            record_track_error(conn, job["id"], "file is missing on disk")
             continue
         pending_jobs.append(job)
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_job = {
-            executor.submit(analyze_basic_features, Path(job["path"]), quick=quick): job
+            executor.submit(
+                analyze_basic_features,
+                Path(job["path"]),
+                quick=quick,
+                chunked=chunked,
+                chunk_sec=chunk_sec,
+                max_chunks=max_chunks,
+            ): job
             for job in pending_jobs
         }
         for future in as_completed(future_to_job):
@@ -238,10 +726,10 @@ def process_basic_analysis(
                 summary.updated += 1
             except AudioAnalysisError as exc:
                 summary.errors += 1
-                _record_track_error(conn, job["id"], str(exc))
+                record_track_error(conn, job["id"], str(exc))
             except Exception as exc:  # pragma: no cover - defensive safety net
                 summary.errors += 1
-                _record_track_error(conn, job["id"], f"unexpected analysis error: {exc}")
+                record_track_error(conn, job["id"], f"unexpected analysis error: {exc}")
 
     conn.commit()
     return summary
@@ -305,11 +793,12 @@ def save_audio_features(
     conn.execute(
         """
         UPDATE tracks
-        SET analysis_version = ?, analyzed_at = ?, last_error = NULL
+        SET analysis_version = ?, analyzed_at = ?
         WHERE id = ?
         """,
         (ANALYSIS_VERSION, now, track_id),
     )
+    clear_track_failure(conn, track_id)
     refresh_profile_with_audio_features(conn, track_id, features, updated_at=now)
 
 
@@ -349,6 +838,9 @@ def _process_one_job(
     summary: BasicAnalysisSummary,
     *,
     quick: bool,
+    chunked: bool,
+    chunk_sec: float,
+    max_chunks: int | None,
 ) -> None:
     if _should_skip_job(conn, job):
         summary.skipped += 1
@@ -357,20 +849,26 @@ def _process_one_job(
     path = Path(job["path"])
     if not path.exists():
         summary.skipped += 1
-        _record_track_error(conn, job["id"], "file is missing on disk")
+        record_track_error(conn, job["id"], "file is missing on disk")
         return
 
     summary.processed += 1
     try:
-        features = analyze_basic_features(path, quick=quick)
+        features = analyze_basic_features(
+            path,
+            quick=quick,
+            chunked=chunked,
+            chunk_sec=chunk_sec,
+            max_chunks=max_chunks,
+        )
         save_audio_features(conn, job["id"], features)
         summary.updated += 1
     except AudioAnalysisError as exc:
         summary.errors += 1
-        _record_track_error(conn, job["id"], str(exc))
+        record_track_error(conn, job["id"], str(exc))
     except Exception as exc:  # pragma: no cover - defensive safety net
         summary.errors += 1
-        _record_track_error(conn, job["id"], f"unexpected analysis error: {exc}")
+        record_track_error(conn, job["id"], f"unexpected analysis error: {exc}")
 
 
 def _select_tracks_for_analysis(
@@ -378,7 +876,7 @@ def _select_tracks_for_analysis(
     *,
     track_id: str | None,
 ) -> list[sqlite3.Row]:
-    clauses = ["missing_at IS NULL"]
+    clauses = ["missing_at IS NULL", "quarantined_at IS NULL"]
     params: list[Any] = []
     if track_id is not None:
         clauses.append("id = ?")
@@ -403,10 +901,6 @@ def _should_skip_job(conn: sqlite3.Connection, job: sqlite3.Row | dict[str, Any]
         (job["id"],),
     ).fetchone()
     return row is not None
-
-
-def _record_track_error(conn: sqlite3.Connection, track_id: str, error: str) -> None:
-    conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))
 
 
 def _safe_mean(values: Any, *, np: Any) -> float:

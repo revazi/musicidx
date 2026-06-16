@@ -148,7 +148,15 @@ ADD_FINGERPRINT_DURATION_SQL = """
 ALTER TABLE tracks ADD COLUMN fingerprint_duration REAL;
 """
 
+ADD_FAILURE_QUARANTINE_SQL = """
+ALTER TABLE tracks ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tracks ADD COLUMN last_error_at TEXT;
+ALTER TABLE tracks ADD COLUMN quarantined_at TEXT;
+ALTER TABLE tracks ADD COLUMN quarantine_reason TEXT;
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA_SQL),
     (2, "add_fingerprint_duration", ADD_FINGERPRINT_DURATION_SQL),
+    (3, "add_failure_quarantine", ADD_FAILURE_QUARANTINE_SQL),
 ]

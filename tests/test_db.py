@@ -69,6 +69,6 @@ def test_migrations_are_idempotent(tmp_path):
         apply_migrations(conn)
 
         rows = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-        assert [row["version"] for row in rows] == [1, 2]
+        assert [row["version"] for row in rows] == [1, 2, 3]
     finally:
         conn.close()

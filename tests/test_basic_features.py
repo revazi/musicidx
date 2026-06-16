@@ -1,17 +1,32 @@
 from __future__ import annotations
 
 import json
+import sys
+import warnings
+from types import SimpleNamespace
+
+import pytest
 
 from musicidx.analyzer.basic_features import (
     ANALYSIS_VERSION,
     AudioAnalysisError,
     AudioFeatures,
+    _chunk_windows,
+    analyze_basic_features,
     estimate_key_mode,
     process_basic_analysis,
     save_audio_features,
 )
 from musicidx.db import connect_db, init_db
 from musicidx.metadata import search_text
+
+
+def test_chunk_windows_can_sample_long_files_evenly():
+    assert _chunk_windows(600.0, chunk_sec=60.0, max_chunks=3) == [
+        (0.0, 60.0),
+        (240.0, 60.0),
+        (540.0, 60.0),
+    ]
 
 
 def test_estimate_key_mode_returns_rough_key_for_chroma_profile():
@@ -79,7 +94,7 @@ def test_process_basic_analysis_skips_current_version(monkeypatch, tmp_path):
         init_db(conn)
         _insert_track(conn, "track-1", track_path)
 
-        def fake_analyze_basic_features(path, *, quick=False):
+        def fake_analyze_basic_features(path, *, quick=False, **kwargs):
             assert path == track_path
             assert quick is True
             return _features()
@@ -100,6 +115,25 @@ def test_process_basic_analysis_skips_current_version(monkeypatch, tmp_path):
         conn.close()
 
 
+def test_analyze_basic_features_captures_decoder_noise(monkeypatch, tmp_path, capsys):
+    track_path = tmp_path / "bad.mp3"
+    track_path.write_bytes(b"bad")
+
+    def fake_load(*args, **kwargs):
+        warnings.warn("PySoundFile failed. Trying audioread instead.", UserWarning, stacklevel=2)
+        print("[src/libmpg123] bad header", file=sys.stderr)
+        raise RuntimeError("")
+
+    monkeypatch.setitem(sys.modules, "librosa", SimpleNamespace(load=fake_load))
+
+    with pytest.raises(AudioAnalysisError) as exc_info:
+        analyze_basic_features(track_path, quick=True)
+
+    assert "bad header" in str(exc_info.value)
+    assert "PySoundFile failed" in str(exc_info.value)
+    assert capsys.readouterr().err == ""
+
+
 def test_process_basic_analysis_records_errors_without_crashing(monkeypatch, tmp_path):
     track_path = tmp_path / "corrupt.wav"
     track_path.write_bytes(b"not audio")
@@ -108,7 +142,7 @@ def test_process_basic_analysis_records_errors_without_crashing(monkeypatch, tmp
         init_db(conn)
         _insert_track(conn, "track-1", track_path)
 
-        def fake_analyze_basic_features(path, *, quick=False):
+        def fake_analyze_basic_features(path, *, quick=False, **kwargs):
             raise AudioAnalysisError("failed to decode audio")
 
         monkeypatch.setattr(

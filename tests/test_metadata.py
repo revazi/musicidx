@@ -96,6 +96,31 @@ def test_save_metadata_updates_tracks_profiles_and_fts(tmp_path):
         conn.close()
 
 
+def test_metadata_missing_only_does_not_retry_titleless_profiled_tracks(monkeypatch, tmp_path):
+    track_path = tmp_path / "untitled.mp3"
+    track_path.write_bytes(b"audio")
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(conn, "track-1", track_path)
+        metadata = TrackMetadata(duration_sec=120.0, codec="mp3", sample_rate=44100, channels=2)
+        profile_text, profile_json = build_track_profile(metadata, track_path)
+        save_track_metadata(conn, "track-1", metadata, profile_text, profile_json)
+        conn.commit()
+
+        def fake_extract_metadata(path):
+            raise AssertionError("title-less profiled track should be skipped")
+
+        monkeypatch.setattr("musicidx.metadata.extract_metadata", fake_extract_metadata)
+
+        summary = process_metadata(conn, missing_only=True)
+
+        assert summary.processed == 0
+        assert summary.updated == 0
+    finally:
+        conn.close()
+
+
 def test_process_metadata_uses_extractor_and_populates_search(monkeypatch, tmp_path):
     track_path = tmp_path / "song.flac"
     track_path.write_bytes(b"audio")

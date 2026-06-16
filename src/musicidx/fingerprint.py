@@ -11,6 +11,7 @@ from typing import Any
 
 from musicidx.config import FPCALC_PATH_ENV_VAR, resolve_executable
 from musicidx.db import utc_now
+from musicidx.failures import clear_track_failure, record_track_error
 
 
 class FingerprintError(RuntimeError):
@@ -134,7 +135,7 @@ def process_fingerprints(
         path = Path(row["path"])
         if not path.exists():
             summary.skipped += 1
-            _record_track_error(conn, row["id"], "file is missing on disk")
+            record_track_error(conn, row["id"], "file is missing on disk")
             continue
 
         summary.processed += 1
@@ -144,7 +145,7 @@ def process_fingerprints(
             summary.updated += 1
         except FingerprintError as exc:
             summary.errors += 1
-            _record_track_error(conn, row["id"], str(exc))
+            record_track_error(conn, row["id"], str(exc))
 
     conn.commit()
     return summary
@@ -159,11 +160,12 @@ def save_track_fingerprint(
     conn.execute(
         """
         UPDATE tracks
-        SET chromaprint = ?, fingerprint_duration = ?, indexed_at = ?, last_error = NULL
+        SET chromaprint = ?, fingerprint_duration = ?, indexed_at = ?
         WHERE id = ?
         """,
         (fingerprint.chromaprint, fingerprint.duration_sec, utc_now(), track_id),
     )
+    clear_track_failure(conn, track_id)
 
 
 def find_duplicate_groups(
@@ -206,7 +208,7 @@ def _select_tracks_for_fingerprinting(
     track_id: str | None,
     missing_only: bool,
 ) -> list[sqlite3.Row]:
-    clauses = ["missing_at IS NULL"]
+    clauses = ["missing_at IS NULL", "quarantined_at IS NULL"]
     params: list[Any] = []
     if track_id is not None:
         clauses.append("id = ?")
@@ -439,10 +441,6 @@ def _append_group(
         return
     seen_signatures.add(signature)
     groups.append(group)
-
-
-def _record_track_error(conn: sqlite3.Connection, track_id: str, error: str) -> None:
-    conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))
 
 
 def _parse_float(value: Any) -> float | None:

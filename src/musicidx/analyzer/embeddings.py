@@ -111,10 +111,8 @@ def process_embeddings(
             vectors = embed_texts(texts, model_name=model_name)
             if len(vectors) != len(batch):
                 raise EmbeddingError("embedding model returned unexpected vector count")
-        except EmbeddingError as exc:
+        except EmbeddingError:
             summary.errors += len(batch)
-            for row in batch:
-                _record_track_error(conn, row["track_id"], str(exc))
             continue
 
         for row, vector in zip(batch, vectors, strict=True):
@@ -163,7 +161,6 @@ def save_profile_embedding(
             now,
         ),
     )
-    conn.execute("UPDATE tracks SET last_error = NULL WHERE id = ?", (track_id,))
 
 
 def search_semantic(
@@ -247,7 +244,7 @@ def _select_profiles_for_embedding(
     *,
     track_id: str | None,
 ) -> list[sqlite3.Row]:
-    clauses = ["t.missing_at IS NULL"]
+    clauses = ["t.missing_at IS NULL", "t.quarantined_at IS NULL"]
     params: list[Any] = []
     if track_id is not None:
         clauses.append("t.id = ?")
@@ -325,6 +322,3 @@ def _ensure_2d_float32(vectors: Any) -> np.ndarray:
         raise EmbeddingError("embedding model returned an invalid vector shape")
     return np.asarray([normalize_vector(vector) for vector in array], dtype=np.float32)
 
-
-def _record_track_error(conn: sqlite3.Connection, track_id: str, error: str) -> None:
-    conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))

@@ -19,7 +19,7 @@ Implemented:
 - optional Gemini/OpenAI intent parsing with local-only ranking
 - search export as M3U / JSON / CSV
 - eval, judging, and feedback commands
-- early cross-platform Tauri desktop UI with cancellable indexing
+- early cross-platform Tauri desktop UI with cancellable indexing and app-open background auto-indexing
 
 Not implemented yet:
 
@@ -185,6 +185,8 @@ DB path:           optional; defaults to ./musicidx.sqlite
 Models path:       optional; defaults to ./.musicidx-models
 ```
 
+When a music folder is configured, the desktop app checks for changes while it is open. The interval is configurable in Settings, defaults to 1 minute for testing, and can be changed to 5/10/30/60 minutes. If files were added/modified/removed, it runs the same safe adaptive indexing pipeline in the background and shows progress with a Cancel button. Modified files invalidate stale metadata, fingerprints, audio features, tags, profiles, and embeddings so they are refreshed by the pipeline.
+
 More desktop notes: [`docs/desktop-tauri.md`](docs/desktop-tauri.md).
 
 ## Supported audio files
@@ -202,15 +204,16 @@ uv run musicidx init
 uv run musicidx scan /path/to/music
 uv run musicidx metadata --missing-only
 uv run musicidx fingerprint --missing-only
-uv run musicidx analyze-basic --quick --workers auto --resource-profile auto
+uv run musicidx analyze-basic --quick --chunked --chunk-sec auto --workers auto --resource-profile auto
 uv run musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto
 uv run musicidx embed --model .musicidx-models/all-MiniLM-L6-v2 --batch-size auto --resource-profile auto
 ```
 
 Notes:
 
-- `--resource-profile auto` scales workers/batch size from detected RAM/CPU.
+- `--resource-profile auto` scales workers, chunk size, and batch size from detected RAM/CPU.
 - Available profiles: `auto`, `low`, `balanced`, `full`.
+- `analyze-basic --chunked` analyzes audio in sequential chunks to reduce peak RAM for long tracks.
 - `analyze-tags` is the most memory-sensitive step; subprocess batches are enabled by default so TensorFlow/Essentia memory is reclaimed between small batches.
 - Avoid `embed --refresh` unless you intentionally want to recompute embeddings.
 - See [`.agents/optimisation.md`](.agents/optimisation.md) for the optimisation plan.
@@ -227,6 +230,8 @@ musicidx db-info
 musicidx --help
 ```
 
+Indexing JSON commands include runtime diagnostics such as `duration_sec`, `peak_memory_mb`, and child-process peak memory where available.
+
 Indexing:
 
 ```bash
@@ -234,10 +239,21 @@ musicidx init
 musicidx scan /path/to/music --json
 musicidx metadata --missing-only --json
 musicidx fingerprint --missing-only --json
-musicidx analyze-basic --quick --workers auto --resource-profile auto --json
+musicidx analyze-basic --quick --chunked --chunk-sec auto --workers auto --resource-profile auto --json
 musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto --json
 musicidx embed --batch-size auto --resource-profile auto --json
 ```
+
+Failed/corrupt tracks:
+
+```bash
+musicidx failed
+musicidx failed --json
+musicidx retry-failed --track-id <track-id>
+musicidx retry-failed --all
+```
+
+Tracks are quarantined after repeated failures and skipped by default in indexing commands. If you replace/fix a file, run `retry-failed` or rescan after the file metadata changes.
 
 Search:
 

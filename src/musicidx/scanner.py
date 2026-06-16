@@ -123,12 +123,15 @@ def scan_library(
 
             stored_content_hash = existing["content_hash"]
             new_content_hash = content_hash if full_hash else stored_content_hash
+            file_metadata_changed = (
+                existing["extension"] != extension
+                or existing["file_size"] != stat.st_size
+                or existing["file_mtime_ns"] != stat.st_mtime_ns
+            )
             metadata_changed = (
                 existing["root_id"] != root_id
                 or existing["path_hash"] != path_hash
-                or existing["extension"] != extension
-                or existing["file_size"] != stat.st_size
-                or existing["file_mtime_ns"] != stat.st_mtime_ns
+                or file_metadata_changed
             )
             hash_changed = (
                 full_hash
@@ -138,6 +141,7 @@ def scan_library(
             )
             hash_backfilled = full_hash and stored_content_hash is None and content_hash is not None
             was_missing = existing["missing_at"] is not None
+            stale_analysis = file_metadata_changed or hash_changed
             row_changed = metadata_changed or hash_changed or hash_backfilled or was_missing
 
             if metadata_changed or hash_changed or was_missing:
@@ -151,7 +155,8 @@ def scan_library(
                     UPDATE tracks
                     SET root_id = ?, path_hash = ?, extension = ?, file_size = ?,
                         file_mtime_ns = ?, content_hash = ?, indexed_at = ?, missing_at = NULL,
-                        last_error = NULL
+                        last_error = NULL, last_error_at = NULL, error_count = 0,
+                        quarantined_at = NULL, quarantine_reason = NULL
                     WHERE id = ?
                     """,
                     (
@@ -165,6 +170,8 @@ def scan_library(
                         existing["id"],
                     ),
                 )
+                if stale_analysis:
+                    _clear_stale_track_outputs(conn, existing["id"])
 
         if root_id is not None:
             _mark_missing_tracks(conn, root_id, seen_paths, now, summary, dry_run=dry_run)
@@ -198,6 +205,39 @@ def _insert_library_root(conn: sqlite3.Connection, root: Path, now: str) -> int:
         (str(root), now, now),
     )
     return int(cursor.lastrowid)
+
+
+def _clear_stale_track_outputs(conn: sqlite3.Connection, track_id: str) -> None:
+    """Invalidate derived data after an existing file changes on disk."""
+    conn.execute(
+        """
+        UPDATE tracks
+        SET chromaprint = NULL,
+            fingerprint_duration = NULL,
+            title = NULL,
+            artist = NULL,
+            album = NULL,
+            album_artist = NULL,
+            genre = NULL,
+            date = NULL,
+            track_number = NULL,
+            disc_number = NULL,
+            duration_sec = NULL,
+            codec = NULL,
+            sample_rate = NULL,
+            bit_rate = NULL,
+            channels = NULL,
+            analysis_version = 0,
+            analyzed_at = NULL
+        WHERE id = ?
+        """,
+        (track_id,),
+    )
+    conn.execute("DELETE FROM audio_features WHERE track_id = ?", (track_id,))
+    conn.execute("DELETE FROM track_tags WHERE track_id = ?", (track_id,))
+    conn.execute("DELETE FROM track_profiles WHERE track_id = ?", (track_id,))
+    conn.execute("DELETE FROM embeddings WHERE track_id = ?", (track_id,))
+    conn.execute("DELETE FROM tracks_fts WHERE track_id = ?", (track_id,))
 
 
 def _mark_missing_tracks(

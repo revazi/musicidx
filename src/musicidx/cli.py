@@ -52,13 +52,17 @@ from musicidx.config import (
     resolve_models_path,
 )
 from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
+from musicidx.failures import list_failed_tracks, record_track_error, reset_failed_tracks
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
 from musicidx.resources import (
+    RuntimeTimer,
     recommend_indexing_plan,
+    resolve_basic_chunk_sec,
     resolve_embedding_batch_size,
     resolve_tag_batch_size,
     resolve_worker_count,
+    with_runtime_diagnostics,
 )
 from musicidx.scanner import scan_library
 from musicidx.search.evaluation import (
@@ -156,6 +160,23 @@ QuickOption = Annotated[
     bool,
     typer.Option("--quick", help="Analyze only the first 120 seconds of each track."),
 ]
+ChunkedOption = Annotated[
+    bool,
+    typer.Option("--chunked", help="Analyze audio in sequential chunks to reduce peak RAM."),
+]
+ChunkSecOption = Annotated[
+    str,
+    typer.Option("--chunk-sec", help="Chunk duration in seconds, or 'auto'."),
+]
+MaxChunksOption = Annotated[
+    int | None,
+    typer.Option(
+        "--max-chunks",
+        min=1,
+        max=10000,
+        help="Maximum chunks to sample for chunked analysis. Default: all chunks.",
+    ),
+]
 WorkersOption = Annotated[
     str,
     typer.Option("--workers", help="Number of analysis worker threads, or 'auto'."),
@@ -246,6 +267,14 @@ FeedbackNoteOption = Annotated[
     str | None,
     typer.Option("--note", help="Optional feedback note."),
 ]
+FailedQuarantinedOnlyOption = Annotated[
+    bool,
+    typer.Option("--quarantined-only", help="Show only quarantined failed tracks."),
+]
+RetryAllOption = Annotated[
+    bool,
+    typer.Option("--all", help="Reset all failed/quarantined tracks."),
+]
 ExportFormatOption = Annotated[
     str,
     typer.Option("--format", help="Export format: m3u, json, or csv."),
@@ -289,6 +318,13 @@ def _resolve_embedding_batch_size(value: str | int, *, resource_profile: str) ->
 def _resolve_tag_batch_size(value: str | int, *, resource_profile: str) -> int:
     try:
         return resolve_tag_batch_size(value, profile=resource_profile)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _resolve_basic_chunk_sec(value: str | float, *, resource_profile: str) -> float:
+    try:
+        return resolve_basic_chunk_sec(value, profile=resource_profile)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -356,7 +392,7 @@ def _summary_from_payload(payload: dict[str, Any]) -> TagAnalysisSummary:
 
 def _record_tag_batch_error(conn: sqlite3.Connection, track_ids: list[str], error: str) -> None:
     for track_id in track_ids:
-        conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))
+        record_track_error(conn, track_id, error)
     conn.commit()
 
 
@@ -519,7 +555,8 @@ def doctor_command(json_output: JsonOption = False) -> None:
             "status": "available",
             "detail": (
                 f"{resource_plan.effective_profile}: basic workers "
-                f"{resource_plan.basic_workers}, tag workers {resource_plan.tag_workers}, "
+                f"{resource_plan.basic_workers}, chunk {resource_plan.basic_chunk_sec:g}s, "
+                f"tag workers {resource_plan.tag_workers}, "
                 f"tag batch {resource_plan.tag_batch_size}, "
                 f"embed batch {resource_plan.embedding_batch_size}"
             ),
@@ -570,6 +607,7 @@ def resources_command(
     table.add_row("CPU count", str(resources["cpu_count"]))
     table.add_row("Total memory", f"{resources['total_memory_gb']} GB")
     table.add_row("Basic workers", str(payload["basic_workers"]))
+    table.add_row("Basic chunk seconds", str(payload["basic_chunk_sec"]))
     table.add_row("Tag workers", str(payload["tag_workers"]))
     table.add_row("Embedding batch size", str(payload["embedding_batch_size"]))
     table.add_row("Tag batch size", str(payload["tag_batch_size"]))
@@ -611,6 +649,7 @@ def db_info_command(db: DbOption = None, json_output: JsonOption = False) -> Non
 
     conn = connect_db(db_path)
     try:
+        init_db(conn)
         payload = {"exists": True, **db_info(conn, db_path)}
     finally:
         conn.close()
@@ -633,6 +672,83 @@ def db_info_command(db: DbOption = None, json_output: JsonOption = False) -> Non
     console.print(table)
 
 
+@app.command("failed")
+def failed_command(
+    db: DbOption = None,
+    include_missing: IncludeMissingOption = False,
+    quarantined_only: FailedQuarantinedOnlyOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """List tracks with repeated failures or quarantine state."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        failed_tracks = list_failed_tracks(
+            conn,
+            include_missing=include_missing,
+            quarantined_only=quarantined_only,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "db_path": str(db_path),
+        "count": len(failed_tracks),
+        "failed": [track.as_dict() for track in failed_tracks],
+    }
+    if json_output:
+        _print_json(payload)
+        return
+
+    if not failed_tracks:
+        console.print("[green]No failed or quarantined tracks.[/green]")
+        return
+
+    table = Table(title="Failed/quarantined tracks")
+    table.add_column("Count", justify="right")
+    table.add_column("Quarantined")
+    table.add_column("Artist")
+    table.add_column("Title")
+    table.add_column("Path")
+    table.add_column("Error")
+    for track in failed_tracks:
+        table.add_row(
+            str(track.error_count),
+            "yes" if track.quarantined_at else "no",
+            track.artist or "",
+            track.title or "",
+            track.path,
+            track.last_error or track.quarantine_reason or "",
+        )
+    console.print(table)
+
+
+@app.command("retry-failed")
+def retry_failed_command(
+    db: DbOption = None,
+    track_id: TrackIdOption = None,
+    all_tracks: RetryAllOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Clear failure/quarantine state so failed tracks can be retried."""
+    if track_id is None and not all_tracks:
+        raise typer.BadParameter("pass --track-id <id> or --all")
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        reset_count = reset_failed_tracks(conn, track_id=track_id if not all_tracks else None)
+    finally:
+        conn.close()
+
+    payload = {"db_path": str(db_path), "reset": reset_count, "track_id": track_id}
+    if json_output:
+        _print_json(payload)
+        return
+    console.print(f"[green]Reset failed track state:[/green] {reset_count}")
+
+
 @app.command("scan")
 def scan_command(
     directory: DirectoryArg,
@@ -643,6 +759,7 @@ def scan_command(
     json_output: JsonOption = False,
 ) -> None:
     """Recursively scan a directory for supported audio files."""
+    timer = RuntimeTimer()
     db_path = resolve_db_path(db)
     conn = connect_db(db_path)
     try:
@@ -663,7 +780,7 @@ def scan_command(
     finally:
         conn.close()
 
-    payload = {"db_path": str(db_path), **summary.as_dict()}
+    payload = with_runtime_diagnostics({"db_path": str(db_path), **summary.as_dict()}, timer)
     if json_output:
         _print_json(payload)
         return
@@ -688,6 +805,7 @@ def metadata_command(
     json_output: JsonOption = False,
 ) -> None:
     """Extract metadata for scanned tracks using ffprobe."""
+    timer = RuntimeTimer()
     db_path = resolve_db_path(db)
     conn = connect_db(db_path)
     try:
@@ -696,11 +814,15 @@ def metadata_command(
     finally:
         conn.close()
 
-    payload = {
-        "db_path": str(db_path),
-        "ffprobe_available": is_ffprobe_available(),
-        **summary.as_dict(),
-    }
+    payload = with_runtime_diagnostics(
+        {
+            "db_path": str(db_path),
+            "ffprobe_available": is_ffprobe_available(),
+            **summary.as_dict(),
+        },
+        timer,
+        include_child_peak=True,
+    )
     if json_output:
         _print_json(payload)
         return
@@ -771,6 +893,7 @@ def fingerprint_command(
     json_output: JsonOption = False,
 ) -> None:
     """Fingerprint scanned tracks with fpcalc/chromaprint."""
+    timer = RuntimeTimer()
     db_path = resolve_db_path(db)
     conn = connect_db(db_path)
     try:
@@ -779,11 +902,15 @@ def fingerprint_command(
     finally:
         conn.close()
 
-    payload = {
-        "db_path": str(db_path),
-        "fpcalc_available": is_fpcalc_available(),
-        **summary.as_dict(),
-    }
+    payload = with_runtime_diagnostics(
+        {
+            "db_path": str(db_path),
+            "fpcalc_available": is_fpcalc_available(),
+            **summary.as_dict(),
+        },
+        timer,
+        include_child_peak=True,
+    )
     if json_output:
         _print_json(payload)
         return
@@ -863,12 +990,17 @@ def analyze_basic_command(
     db: DbOption = None,
     track_id: TrackIdOption = None,
     quick: QuickOption = False,
+    chunked: ChunkedOption = False,
+    chunk_sec: ChunkSecOption = "auto",
+    max_chunks: MaxChunksOption = None,
     workers: WorkersOption = "auto",
     resource_profile: ResourceProfileOption = "auto",
     json_output: JsonOption = False,
 ) -> None:
     """Analyze basic audio features for scanned tracks."""
+    timer = RuntimeTimer()
     resolved_workers = _resolve_workers(workers, kind="basic", resource_profile=resource_profile)
+    resolved_chunk_sec = _resolve_basic_chunk_sec(chunk_sec, resource_profile=resource_profile)
     resource_plan = recommend_indexing_plan(resource_profile)
     db_path = resolve_db_path(db)
     conn = connect_db(db_path)
@@ -879,20 +1011,30 @@ def analyze_basic_command(
             track_id=track_id,
             quick=quick,
             workers=resolved_workers,
+            chunked=chunked,
+            chunk_sec=resolved_chunk_sec,
+            max_chunks=max_chunks,
         )
     finally:
         conn.close()
 
-    payload = {
-        "db_path": str(db_path),
-        "librosa_available": is_librosa_available(),
-        "quick": quick,
-        "workers": resolved_workers,
-        "workers_requested": str(workers),
-        "resource_profile": resource_profile,
-        "resource_plan": resource_plan.as_dict(),
-        **summary.as_dict(),
-    }
+    payload = with_runtime_diagnostics(
+        {
+            "db_path": str(db_path),
+            "librosa_available": is_librosa_available(),
+            "quick": quick,
+            "chunked": chunked,
+            "chunk_sec": resolved_chunk_sec,
+            "chunk_sec_requested": str(chunk_sec),
+            "max_chunks": max_chunks,
+            "workers": resolved_workers,
+            "workers_requested": str(workers),
+            "resource_profile": resource_profile,
+            "resource_plan": resource_plan.as_dict(),
+            **summary.as_dict(),
+        },
+        timer,
+    )
     if json_output:
         _print_json(payload)
         return
@@ -910,6 +1052,11 @@ def analyze_basic_command(
     console.print(f"[bold]Database:[/bold] {db_path}")
     if quick:
         console.print("[yellow]Quick mode:[/yellow] analyzed at most first 120 seconds.")
+    if chunked:
+        max_chunks_text = "all chunks" if max_chunks is None else str(max_chunks)
+        console.print(
+            f"[yellow]Chunked mode:[/yellow] {resolved_chunk_sec:g}s chunks, max {max_chunks_text}."
+        )
     console.print(table)
 
 
@@ -928,6 +1075,7 @@ def analyze_tags_command(
     json_output: JsonOption = False,
 ) -> None:
     """Analyze ML mood/genre tags with local Essentia models."""
+    timer = RuntimeTimer()
     resolved_workers = _resolve_workers(workers, kind="tags", resource_profile=resource_profile)
     resolved_batch_size = _resolve_tag_batch_size(batch_size, resource_profile=resource_profile)
     resource_plan = recommend_indexing_plan(resource_profile)
@@ -972,21 +1120,25 @@ def analyze_tags_command(
         finally:
             conn.close()
 
-    payload = {
-        "db_path": str(db_path),
-        "models_path": str(resolved_models_path),
-        "essentia_available": is_essentia_available(),
-        "min_score": min_score,
-        "workers": resolved_workers,
-        "workers_requested": str(workers),
-        "resource_profile": resource_profile,
-        "resource_plan": resource_plan.as_dict(),
-        "subprocess_batches": use_subprocess_batches,
-        "batch_size": resolved_batch_size,
-        "batch_size_requested": str(batch_size),
-        "batches": batches,
-        **summary.as_dict(),
-    }
+    payload = with_runtime_diagnostics(
+        {
+            "db_path": str(db_path),
+            "models_path": str(resolved_models_path),
+            "essentia_available": is_essentia_available(),
+            "min_score": min_score,
+            "workers": resolved_workers,
+            "workers_requested": str(workers),
+            "resource_profile": resource_profile,
+            "resource_plan": resource_plan.as_dict(),
+            "subprocess_batches": use_subprocess_batches,
+            "batch_size": resolved_batch_size,
+            "batch_size_requested": str(batch_size),
+            "batches": batches,
+            **summary.as_dict(),
+        },
+        timer,
+        include_child_peak=use_subprocess_batches,
+    )
     if json_output:
         _print_json(payload)
         return
@@ -1062,6 +1214,7 @@ def embed_command(
     json_output: JsonOption = False,
 ) -> None:
     """Embed enriched track profile text for semantic search."""
+    timer = RuntimeTimer()
     resolved_batch_size = _resolve_embedding_batch_size(
         batch_size,
         resource_profile=resource_profile,
@@ -1081,16 +1234,19 @@ def embed_command(
     finally:
         conn.close()
 
-    payload = {
-        "db_path": str(db_path),
-        "sentence_transformers_available": is_sentence_transformers_available(),
-        "batch_size": resolved_batch_size,
-        "batch_size_requested": str(batch_size),
-        "resource_profile": resource_profile,
-        "resource_plan": resource_plan.as_dict(),
-        "refresh": refresh,
-        **summary.as_dict(),
-    }
+    payload = with_runtime_diagnostics(
+        {
+            "db_path": str(db_path),
+            "sentence_transformers_available": is_sentence_transformers_available(),
+            "batch_size": resolved_batch_size,
+            "batch_size_requested": str(batch_size),
+            "resource_profile": resource_profile,
+            "resource_plan": resource_plan.as_dict(),
+            "refresh": refresh,
+            **summary.as_dict(),
+        },
+        timer,
+    )
     if json_output:
         _print_json(payload)
         return

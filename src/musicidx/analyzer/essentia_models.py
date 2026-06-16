@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from musicidx.db import utc_now
+from musicidx.failures import clear_track_failure, record_track_error
 from musicidx.profiles import rebuild_track_profile
 
 MANIFEST_FILENAME = "manifest.json"
@@ -241,7 +242,7 @@ def process_tags(
     if not specs:
         summary.errors = len(rows)
         for row in rows:
-            _record_track_error(conn, row["id"], "no available local Essentia model specs found")
+            record_track_error(conn, row["id"], "no available local Essentia model specs found")
         conn.commit()
         return summary
 
@@ -256,7 +257,7 @@ def process_tags(
         path = Path(row["path"])
         if not path.exists():
             summary.skipped += 1
-            _record_track_error(conn, row["id"], "file is missing on disk")
+            record_track_error(conn, row["id"], "file is missing on disk")
             continue
         pending_jobs.append(row)
 
@@ -279,10 +280,10 @@ def process_tags(
                 summary.updated += 1
             except EssentiaModelError as exc:
                 summary.errors += 1
-                _record_track_error(conn, row["id"], str(exc))
+                record_track_error(conn, row["id"], str(exc))
             except Exception as exc:  # pragma: no cover - defensive safety net
                 summary.errors += 1
-                _record_track_error(conn, row["id"], f"unexpected tag analysis error: {exc}")
+                record_track_error(conn, row["id"], f"unexpected tag analysis error: {exc}")
 
     conn.commit()
     return summary
@@ -313,7 +314,7 @@ def save_track_tags(
             (track_id, tag.source, tag.tag, tag.score, now),
         )
 
-    conn.execute("UPDATE tracks SET last_error = NULL WHERE id = ?", (track_id,))
+    clear_track_failure(conn, track_id)
     rebuild_track_profile(conn, track_id, updated_at=now)
 
 
@@ -502,7 +503,7 @@ def _select_tracks_for_tags(
     track_ids: list[str] | None = None,
     missing_only: bool,
 ) -> list[sqlite3.Row]:
-    clauses = ["missing_at IS NULL"]
+    clauses = ["missing_at IS NULL", "quarantined_at IS NULL"]
     params: list[Any] = []
     if track_id is not None:
         clauses.append("id = ?")
@@ -533,7 +534,7 @@ def _process_one_tag_job(
     path = Path(row["path"])
     if not path.exists():
         summary.skipped += 1
-        _record_track_error(conn, row["id"], "file is missing on disk")
+        record_track_error(conn, row["id"], "file is missing on disk")
         return
 
     summary.processed += 1
@@ -543,14 +544,10 @@ def _process_one_tag_job(
         summary.updated += 1
     except EssentiaModelError as exc:
         summary.errors += 1
-        _record_track_error(conn, row["id"], str(exc))
+        record_track_error(conn, row["id"], str(exc))
     except Exception as exc:  # pragma: no cover - defensive safety net
         summary.errors += 1
-        _record_track_error(conn, row["id"], f"unexpected tag analysis error: {exc}")
-
-
-def _record_track_error(conn: sqlite3.Connection, track_id: str, error: str) -> None:
-    conn.execute("UPDATE tracks SET last_error = ? WHERE id = ?", (error, track_id))
+        record_track_error(conn, row["id"], f"unexpected tag analysis error: {exc}")
 
 
 def _required_str(entry: dict[str, Any], key: str) -> str:

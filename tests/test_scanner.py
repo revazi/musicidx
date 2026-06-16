@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from musicidx.db import connect_db, init_db
+from musicidx.db import connect_db, init_db, utc_now
 from musicidx.scanner import scan_library
 
 
@@ -72,6 +72,101 @@ def test_scan_dry_run_does_not_write_rows(tmp_path):
         assert _track_count(conn) == 0
     finally:
         conn.close()
+
+
+def test_modified_file_invalidates_derived_outputs(tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    track = root / "song.mp3"
+    track.write_bytes(b"old-audio")
+
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        scan_library(root, conn)
+        track_row = conn.execute(
+            "SELECT id FROM tracks WHERE path = ?",
+            (str(track.resolve()),),
+        ).fetchone()
+        track_id = track_row["id"]
+        _seed_derived_outputs(conn, track_id)
+
+        track.write_bytes(b"new-audio-with-different-size")
+        summary = scan_library(root, conn)
+
+        assert summary.modified == 1
+        row = conn.execute(
+            """
+            SELECT chromaprint, fingerprint_duration, title, duration_sec,
+                   codec, analysis_version, analyzed_at
+            FROM tracks
+            WHERE id = ?
+            """,
+            (track_id,),
+        ).fetchone()
+        assert row["chromaprint"] is None
+        assert row["fingerprint_duration"] is None
+        assert row["title"] is None
+        assert row["duration_sec"] is None
+        assert row["codec"] is None
+        assert row["analysis_version"] == 0
+        assert row["analyzed_at"] is None
+        assert _related_count(conn, "audio_features", track_id) == 0
+        assert _related_count(conn, "track_tags", track_id) == 0
+        assert _related_count(conn, "track_profiles", track_id) == 0
+        assert _related_count(conn, "embeddings", track_id) == 0
+        assert _related_count(conn, "tracks_fts", track_id) == 0
+    finally:
+        conn.close()
+
+
+def _seed_derived_outputs(conn, track_id: str) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        UPDATE tracks
+        SET chromaprint = 'old-fingerprint', fingerprint_duration = 12.3,
+            title = 'Old title', duration_sec = 12.3, codec = 'mp3',
+            analysis_version = 999, analyzed_at = ?
+        WHERE id = ?
+        """,
+        (now, track_id),
+    )
+    conn.execute(
+        "INSERT INTO audio_features (track_id, updated_at) VALUES (?, ?)",
+        (track_id, now),
+    )
+    conn.execute(
+        "INSERT INTO track_tags (track_id, source, tag, score, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (track_id, "essentia:test", "old", 0.9, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO track_profiles (track_id, profile_text, profile_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (track_id, "old profile", "{}", now),
+    )
+    conn.execute(
+        """
+        INSERT INTO embeddings (track_id, kind, model, dim, vector, text, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (track_id, "profile", "test-model", 1, b"old", "old profile", now),
+    )
+    conn.execute(
+        """
+        INSERT INTO tracks_fts (track_id, title, artist, album, genre, profile_text)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (track_id, "Old title", None, None, None, "old profile"),
+    )
+    conn.commit()
+
+
+def _related_count(conn, table: str, track_id: str) -> int:
+    row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE track_id = ?", (track_id,)).fetchone()
+    return int(row[0])
 
 
 def _track_count(conn) -> int:

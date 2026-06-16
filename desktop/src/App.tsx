@@ -97,6 +97,8 @@ type SettingsState = {
   exportPath: string;
   themeMode: ThemeMode;
   indexResourceProfile: string;
+  backgroundIndexingEnabled: boolean;
+  backgroundIndexIntervalMinutes: number;
 };
 
 type IndexStep = {
@@ -105,9 +107,38 @@ type IndexStep = {
   args: () => string[];
 };
 
+type IndexCommandPayload = {
+  duration_sec?: number;
+  peak_memory_mb?: number | null;
+  child_peak_memory_mb?: number | null;
+  processed?: number;
+  updated?: number;
+  skipped?: number;
+  errors?: number;
+  added?: number;
+  unchanged?: number;
+  modified?: number;
+  missing?: number;
+  total_seen?: number;
+  batches?: number;
+  batch_size?: number;
+  chunked?: boolean;
+  chunk_sec?: number;
+  workers?: number;
+};
+
+type PipelineSummary = {
+  id: string;
+  label: string;
+  text: string;
+  hasErrors: boolean;
+};
+
 const SETTINGS_KEY = "musicidx.desktop.settings.v2";
 const DEFAULT_SEMANTIC_MODEL = ".musicidx-models/all-MiniLM-L6-v2";
 const MAX_RAW_OUTPUT_CHARS = 512 * 1024;
+const DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES = 1;
+const BACKGROUND_INDEX_INTERVAL_OPTIONS_MINUTES = [1, 5, 10, 30, 60] as const;
 
 const defaultSettings: SettingsState = {
   cwd: "",
@@ -125,6 +156,8 @@ const defaultSettings: SettingsState = {
   exportPath: "",
   themeMode: "system",
   indexResourceProfile: "auto",
+  backgroundIndexingEnabled: true,
+  backgroundIndexIntervalMinutes: DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES,
 };
 
 export default function App() {
@@ -143,11 +176,18 @@ export default function App() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [advancedIndexing, setAdvancedIndexing] = useState(false);
   const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineMode, setPipelineMode] = useState<"manual" | "background" | null>(null);
   const [pipelineStep, setPipelineStep] = useState("Idle");
   const [pipelineCompleted, setPipelineCompleted] = useState(0);
+  const [pipelineSummaries, setPipelineSummaries] = useState<PipelineSummary[]>([]);
+  const [backgroundStatus, setBackgroundStatus] = useState("Background watcher idle");
+  const [settingsSaveStatus, setSettingsSaveStatus] = useState("");
   const [canceling, setCanceling] = useState(false);
   const currentRequestIdRef = useRef<string | null>(null);
   const cancelRequestedRef = useRef(false);
+  const backgroundJobRunningRef = useRef(false);
+  const busyRef = useRef(false);
+  const pipelineRunningRef = useRef(false);
 
   const indexSteps = useMemo<IndexStep[]>(
     () => [
@@ -172,6 +212,9 @@ export default function App() {
         args: () => [
           "analyze-basic",
           "--quick",
+          "--chunked",
+          "--chunk-sec",
+          "auto",
           "--workers",
           "auto",
           "--resource-profile",
@@ -219,6 +262,11 @@ export default function App() {
 
   const pipelinePercent = Math.round((pipelineCompleted / indexSteps.length) * 100);
   const effectiveTheme = settings.themeMode === "system" ? systemTheme : settings.themeMode;
+  const backgroundIndexIntervalMinutes = normalizeBackgroundIndexIntervalMinutes(
+    settings.backgroundIndexIntervalMinutes,
+  );
+  const backgroundIndexIntervalMs = backgroundIndexIntervalMinutes * 60 * 1000;
+  const backgroundIndexIntervalLabel = formatMinutes(backgroundIndexIntervalMinutes);
 
   useEffect(() => {
     void initializeDesktopState();
@@ -233,6 +281,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    pipelineRunningRef.current = pipelineRunning;
+  }, [pipelineRunning]);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", effectiveTheme === "dark");
     document.documentElement.classList.toggle("light", effectiveTheme === "light");
     document.documentElement.style.colorScheme = effectiveTheme;
@@ -240,6 +296,39 @@ export default function App() {
       theme: settings.themeMode === "system" ? "system" : effectiveTheme,
     }).catch(() => undefined);
   }, [effectiveTheme, settings.themeMode]);
+
+  useEffect(() => {
+    if (!settings.backgroundIndexingEnabled) {
+      setBackgroundStatus("Background indexing disabled");
+      return undefined;
+    }
+    if (!settings.musicFolder.trim()) {
+      setBackgroundStatus("Background watcher waiting for a music folder");
+      return undefined;
+    }
+
+    setBackgroundStatus(`Background watcher idle · checks every ${backgroundIndexIntervalLabel}`);
+    const interval = window.setInterval(() => {
+      if (!busyRef.current && !pipelineRunningRef.current) {
+        void runBackgroundCheck();
+      }
+    }, backgroundIndexIntervalMs);
+    return () => window.clearInterval(interval);
+  }, [
+    settings.backgroundIndexingEnabled,
+    settings.musicFolder,
+    settings.cwd,
+    settings.cliPath,
+    settings.prefixArgs,
+    settings.dbPath,
+    settings.modelsPath,
+    settings.ffprobePath,
+    settings.fpcalcPath,
+    settings.semanticModel,
+    settings.indexResourceProfile,
+    backgroundIndexIntervalMs,
+    backgroundIndexIntervalLabel,
+  ]);
 
   async function initializeDesktopState() {
     try {
@@ -259,6 +348,7 @@ export default function App() {
   }
 
   function updateSettings(patch: Partial<SettingsState>) {
+    setSettingsSaveStatus("");
     setSettings((current) => {
       const next = { ...current, ...patch };
       persistSettings(next);
@@ -268,20 +358,85 @@ export default function App() {
 
   function saveSettings() {
     persistSettings(settings);
-    updateStatus("Settings saved");
+    const message = `Settings saved · ${formatClock(new Date())}`;
+    setSettingsSaveStatus(message);
+    updateStatus(message);
+  }
+
+  async function runBackgroundCheck() {
+    if (
+      backgroundJobRunningRef.current ||
+      busyRef.current ||
+      pipelineRunningRef.current ||
+      !settings.backgroundIndexingEnabled ||
+      !settings.musicFolder.trim()
+    ) {
+      return;
+    }
+
+    backgroundJobRunningRef.current = true;
+    cancelRequestedRef.current = false;
+    setCanceling(false);
+    try {
+      setBackgroundStatus("Background watcher checking for changes…");
+      const scanStep = indexSteps[0];
+      const scanPayload = await runJsonCommand<IndexCommandPayload>(scanStep.args());
+      const checkedAt = formatClock(new Date());
+      const changeCount = scanChangeCount(scanPayload);
+      if (changeCount <= 0) {
+        setBackgroundStatus(`No changes · checked ${checkedAt}`);
+        return;
+      }
+
+      setBackgroundStatus(`${describeScanChanges(scanPayload)} · indexing…`);
+      setPipelineMode("background");
+      setPipelineRunning(true);
+      setPipelineCompleted(1);
+      setPipelineStep("Background changes detected");
+      setPipelineSummaries([summarizeIndexStep(scanStep, scanPayload)]);
+
+      const remainingSteps = indexSteps.slice(1);
+      for (const [index, step] of remainingSteps.entries()) {
+        setPipelineStep(`Background: ${step.label}`);
+        const payload = await runJsonCommand<IndexCommandPayload>(step.args());
+        setPipelineSummaries((current) => [...current, summarizeIndexStep(step, payload)]);
+        setPipelineCompleted(index + 2);
+      }
+      setPipelineStep("Complete");
+      setBackgroundStatus(`Indexed ${describeScanChanges(scanPayload)} · ${formatClock(new Date())}`);
+      updateStatus("Background indexing complete");
+    } catch (error) {
+      setPipelineStep(cancelRequestedRef.current ? "Cancelled" : "Stopped");
+      setBackgroundStatus(
+        cancelRequestedRef.current ? "Background indexing cancelled" : "Background indexing failed",
+      );
+      writeRaw(error);
+      updateStatus(
+        cancelRequestedRef.current ? "Background indexing cancelled" : "Background indexing failed",
+        !cancelRequestedRef.current,
+      );
+    } finally {
+      backgroundJobRunningRef.current = false;
+      setPipelineRunning(false);
+      setPipelineMode(null);
+      setCanceling(false);
+    }
   }
 
   async function runFullIndexing() {
     persistSettings(settings);
     cancelRequestedRef.current = false;
     setCanceling(false);
+    setPipelineMode("manual");
     setPipelineRunning(true);
     setPipelineCompleted(0);
+    setPipelineSummaries([]);
     setResults([]);
     try {
       for (const [index, step] of indexSteps.entries()) {
         setPipelineStep(step.label);
-        await runJsonCommand(step.args());
+        const payload = await runJsonCommand<IndexCommandPayload>(step.args());
+        setPipelineSummaries((current) => [...current, summarizeIndexStep(step, payload)]);
         setPipelineCompleted(index + 1);
       }
       setPipelineStep("Complete");
@@ -292,6 +447,7 @@ export default function App() {
       updateStatus(cancelRequestedRef.current ? "Indexing cancelled" : "Indexing failed", !cancelRequestedRef.current);
     } finally {
       setPipelineRunning(false);
+      setPipelineMode(null);
       setCanceling(false);
     }
   }
@@ -300,11 +456,14 @@ export default function App() {
     persistSettings(settings);
     cancelRequestedRef.current = false;
     setCanceling(false);
+    setPipelineMode("manual");
     setPipelineRunning(true);
     setPipelineStep(step.label);
     setPipelineCompleted(0);
+    setPipelineSummaries([]);
     try {
-      await runJsonCommand(step.args());
+      const payload = await runJsonCommand<IndexCommandPayload>(step.args());
+      setPipelineSummaries([summarizeIndexStep(step, payload)]);
       setPipelineCompleted(indexSteps.length);
       setPipelineStep("Complete");
     } catch (error) {
@@ -313,6 +472,7 @@ export default function App() {
       updateStatus(cancelRequestedRef.current ? "Indexing cancelled" : "Indexing failed", !cancelRequestedRef.current);
     } finally {
       setPipelineRunning(false);
+      setPipelineMode(null);
       setCanceling(false);
     }
   }
@@ -590,6 +750,43 @@ export default function App() {
                   onChoose={() => chooseDirectory("musicFolder")}
                 />
               </Field>
+              <label className="flex items-start gap-2 rounded-lg border bg-muted/50 p-3 text-sm">
+                <input
+                  className="mt-1"
+                  type="checkbox"
+                  checked={settings.backgroundIndexingEnabled}
+                  onChange={(event) =>
+                    updateSettings({ backgroundIndexingEnabled: event.target.checked })
+                  }
+                />
+                <span className="grid gap-1">
+                  <span className="font-medium">Background auto-indexing</span>
+                  <span className="text-muted-foreground">
+                    Checks for folder changes every {backgroundIndexIntervalLabel} while the app is open.
+                  </span>
+                </span>
+              </label>
+              <Field label="Background check interval">
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={backgroundIndexIntervalMinutes}
+                  disabled={!settings.backgroundIndexingEnabled}
+                  onChange={(event) =>
+                    updateSettings({
+                      backgroundIndexIntervalMinutes: Number(event.target.value),
+                    })
+                  }
+                >
+                  {BACKGROUND_INDEX_INTERVAL_OPTIONS_MINUTES.map((minutes) => (
+                    <option key={minutes} value={minutes}>
+                      Every {formatMinutes(minutes)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="rounded-lg border bg-muted/50 p-3 text-sm text-muted-foreground">
+                {backgroundStatus}
+              </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-muted-foreground">{pipelineStep}</span>
@@ -632,6 +829,18 @@ export default function App() {
                   <Button variant="outline" disabled={busy} onClick={() => runJsonCommand(["db-info", "--json"])}>
                     <Database className="h-4 w-4" />
                     DB info
+                  </Button>
+                  <Button variant="outline" disabled={busy} onClick={() => runJsonCommand(["failed", "--json"])}>
+                    <Activity className="h-4 w-4" />
+                    Failed tracks
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => runJsonCommand(["retry-failed", "--all", "--json"])}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    Retry all failed
                   </Button>
                 </div>
               ) : null}
@@ -769,11 +978,14 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Button onClick={saveSettings}>Save settings</Button>
               <Button variant="outline" onClick={() => runJsonCommand(["doctor", "--json"])}>
                 Run doctor
               </Button>
+              {settingsSaveStatus ? (
+                <span className="text-sm text-muted-foreground">{settingsSaveStatus}</span>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -835,6 +1047,9 @@ export default function App() {
                 Parse intent
               </Button>
             </div>
+            <div className="rounded-lg border bg-muted/50 px-3 py-2 text-xs text-muted-foreground wrap-anywhere">
+              {backgroundStatus}
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -885,7 +1100,9 @@ export default function App() {
       {pipelineRunning && (
         <div className="fixed bottom-20 left-4 z-40 w-[min(calc(100vw-2rem),20rem)] rounded-xl border bg-card/85 p-4 shadow-xl backdrop-blur-md">
           <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-            <span className="font-medium">Indexing</span>
+            <span className="font-medium">
+              {pipelineMode === "background" ? "Background indexing" : "Indexing"}
+            </span>
             <span className="tabular-nums text-muted-foreground">{pipelinePercent}%</span>
           </div>
           <Progress value={pipelinePercent} />
@@ -895,6 +1112,22 @@ export default function App() {
               {canceling ? "Cancelling…" : "Cancel"}
             </Button>
           </div>
+          {pipelineSummaries.length > 0 ? (
+            <div className="mt-3 max-h-32 space-y-1 overflow-y-auto rounded-lg bg-muted/60 p-2 text-xs">
+              {pipelineSummaries.map((summary) => (
+                <div
+                  key={summary.id}
+                  className={cn(
+                    "grid gap-0.5 wrap-anywhere",
+                    summary.hasErrors ? "text-destructive" : "text-muted-foreground",
+                  )}
+                >
+                  <span className="font-medium text-foreground">{summary.label}</span>
+                  <span>{summary.text}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -1134,6 +1367,54 @@ function ResultCard({
   );
 }
 
+function summarizeIndexStep(step: IndexStep, payload: IndexCommandPayload): PipelineSummary {
+  const counts = [
+    formatCount("added", payload.added),
+    formatCount("modified", payload.modified),
+    formatCount("missing", payload.missing),
+    formatCount("processed", payload.processed),
+    formatCount("updated", payload.updated),
+    formatCount("skipped", payload.skipped),
+    formatCount("errors", payload.errors),
+    formatCount("batches", payload.batches),
+  ].filter(Boolean);
+  const runtime = [
+    payload.duration_sec !== undefined ? `${payload.duration_sec}s` : null,
+    payload.peak_memory_mb ? `${payload.peak_memory_mb}MB peak` : null,
+    payload.child_peak_memory_mb ? `${payload.child_peak_memory_mb}MB child peak` : null,
+    payload.workers ? `${payload.workers} worker${payload.workers === 1 ? "" : "s"}` : null,
+    payload.chunked ? `chunked ${payload.chunk_sec ?? "auto"}s` : null,
+    payload.batch_size ? `batch ${payload.batch_size}` : null,
+  ].filter(Boolean);
+  return {
+    id: `${step.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    label: step.label,
+    text: [...counts, ...runtime].join(" · ") || "complete",
+    hasErrors: (payload.errors ?? 0) > 0,
+  };
+}
+
+function formatCount(label: string, value: number | undefined): string | null {
+  return value === undefined ? null : `${value} ${label}`;
+}
+
+function scanChangeCount(payload: IndexCommandPayload): number {
+  return (payload.added ?? 0) + (payload.modified ?? 0) + (payload.missing ?? 0);
+}
+
+function describeScanChanges(payload: IndexCommandPayload): string {
+  const parts = [
+    formatCount("added", payload.added),
+    formatCount("modified", payload.modified),
+    formatCount("missing", payload.missing),
+  ].filter((part): part is string => Boolean(part && !part.startsWith("0 ")));
+  return parts.length ? parts.join(", ") : "changes";
+}
+
+function formatClock(date: Date): string {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 function envOverrides(settings: SettingsState): Record<string, string> {
   const env: Record<string, string> = {};
   setEnv(env, "MUSICIDX_DB_PATH", settings.dbPath);
@@ -1158,10 +1439,28 @@ function persistSettings(settings: SettingsState) {
 
 function loadSettings(): SettingsState {
   try {
-    return { ...defaultSettings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    const loaded = { ...defaultSettings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    return {
+      ...loaded,
+      backgroundIndexIntervalMinutes: normalizeBackgroundIndexIntervalMinutes(
+        loaded.backgroundIndexIntervalMinutes,
+      ),
+    };
   } catch {
     return defaultSettings;
   }
+}
+
+function normalizeBackgroundIndexIntervalMinutes(value: unknown): number {
+  const minutes = Number(value);
+  if ((BACKGROUND_INDEX_INTERVAL_OPTIONS_MINUTES as readonly number[]).includes(minutes)) {
+    return minutes;
+  }
+  return DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES;
+}
+
+function formatMinutes(minutes: number): string {
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 function parseJsonish<T>(text: string): T {

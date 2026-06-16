@@ -80,10 +80,15 @@ The Tauri UI can:
 - choose a music folder with a native directory picker
 - choose DB/model/export paths where useful
 - run a cancellable low-impact/adaptive indexing pipeline from a floating bottom-left icon button
+- poll the configured music folder at the user-selected interval while the app is open and auto-index detected changes
+- refresh derived metadata/fingerprints/features/tags/profiles/embeddings when an existing file is modified
 - keep indexing setup and individual scan/metadata/fingerprint/basic/tag/embed actions in Settings
-- show pipeline progress by step in a floating progress panel with a Cancel button
+- show manual and background pipeline progress by step, runtime, counts, and memory diagnostics in a floating progress panel with a Cancel button
+- enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
 - choose an indexing resource profile: auto, low, balanced, or full
+- run quick basic audio analysis in adaptive chunks to lower peak RAM
 - run ML tag analysis in adaptive subprocess batches to lower peak RAM
+- inspect failed/quarantined tracks and reset them for retry from advanced indexing actions
 - stream command stdout/stderr into an expandable live/raw output panel
 - parse natural-language intent
 - run concise JSON search with explanations
@@ -106,6 +111,7 @@ MUSICIDX_FFPROBE_PATH
 MUSICIDX_FPCALC_PATH
 semantic/embedding model
 indexing resource profile
+background auto-indexing toggle
 GEMINI_API_KEY
 LLM provider/model
 ```
