@@ -185,9 +185,23 @@ DB path:           optional; defaults to ./musicidx.sqlite
 Models path:       optional; defaults to ./.musicidx-models
 ```
 
-When a music folder is configured, the desktop app checks for changes while it is open. The interval is configurable in Settings, defaults to 1 minute for testing, and can be changed to 5/10/30/60 minutes. If files were added or modified, it runs the same safe adaptive indexing pipeline in the background and shows progress with a Cancel button. Removed files are marked missing immediately; if a previously indexed music folder disappears, its active tracks are marked missing instead of crashing the watcher. Modified files invalidate stale metadata, fingerprints, audio features, tags, profiles, and embeddings so they are refreshed by the pipeline.
+When a music folder is configured, the desktop app checks for changes while it is open. The interval is configurable in Settings, defaults to 1 minute for testing, and can be changed to 5/10/30/60 minutes. Background auto-indexing has its own resource profile and defaults to Balanced, which is faster than conservative Auto/Low but less aggressive than Full. If files were added or modified, it runs the same safe adaptive indexing pipeline in the background and shows progress with a Cancel button. Removed files are marked missing immediately; if a previously indexed music folder disappears, its active tracks are marked missing instead of crashing the watcher. Modified files invalidate stale metadata, fingerprints, audio features, tags, profiles, and embeddings so they are refreshed by the pipeline.
 
 More desktop notes: [`docs/desktop-tauri.md`](docs/desktop-tauri.md).
+
+To build a large copy-to-another-Mac installer with the backend, dependencies, models, and audio helper binaries bundled:
+
+```bash
+npm --prefix desktop run package:mac:all-in-one
+```
+
+For an Intel Mac target, run this on an Intel macOS builder:
+
+```bash
+npm --prefix desktop run package:mac:intel:all-in-one
+```
+
+See [`docs/packaging-macos.md`](docs/packaging-macos.md).
 
 ## Supported audio files
 

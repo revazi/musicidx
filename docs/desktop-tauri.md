@@ -87,7 +87,8 @@ The Tauri UI can:
 - keep indexing setup and individual scan/metadata/fingerprint/basic/tag/embed actions in Settings
 - show manual and background pipeline progress by step, runtime, counts, and memory diagnostics in a floating progress panel with a Cancel button
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
-- choose an indexing resource profile: auto, low, balanced, or full
+- choose separate manual and background indexing resource profiles: auto, low, balanced, or full
+- default background auto-indexing to Balanced so it is faster than conservative Auto/Low but less aggressive than Full
 - run quick basic audio analysis in adaptive chunks to lower peak RAM
 - run ML tag analysis in adaptive subprocess batches to lower peak RAM
 - inspect missing and failed/quarantined tracks from advanced indexing actions
@@ -114,9 +115,10 @@ MUSICIDX_MODELS_PATH
 MUSICIDX_FFPROBE_PATH
 MUSICIDX_FPCALC_PATH
 semantic/embedding model
-indexing resource profile
+manual indexing resource profile
 background auto-indexing toggle
 background check interval
+background indexing resource profile
 GEMINI_API_KEY
 LLM provider/model
 ```
@@ -133,7 +135,7 @@ Working dir:    /path/to/musicidx
 
 This is still an early wrapper scaffold.
 
-- Packaging the Python CLI sidecar is not implemented yet.
+- macOS all-in-one packaging scaffolding exists in `scripts/build-macos-all-in-one.sh`; universal binaries/signing/notarization are not implemented yet.
 - App-data DB/model locations are not implemented yet.
 - Long-running CLI commands stream output and can be cancelled, but there is no per-track structured progress percentage yet.
 - Feedback buttons call the CLI one rating at a time; batch feedback is not implemented yet.

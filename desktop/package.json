@@ -9,7 +9,9 @@
     "build": "tsc && vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "package:mac:all-in-one": "bash ../scripts/build-macos-all-in-one.sh",
+    "package:mac:intel:all-in-one": "bash ../scripts/build-macos-intel-all-in-one.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

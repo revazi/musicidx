@@ -42,7 +42,7 @@ musicidx embed --batch-size auto --resource-profile auto --json
 Expected use:
 
 - run each indexing step from a UI action or setup wizard
-- use adaptive low-impact defaults for one-click indexing
+- use adaptive defaults for one-click indexing; desktop background auto-indexing defaults to the Balanced profile unless changed in Settings
 - use `scan <folder> --json` for app-open background polling
 - run derived indexing steps when `added + modified > 0`; `missing > 0` only needs the scan result to update library state
 - treat `modified > 0` as requiring refresh; scan invalidates stale derived rows for changed files so `--missing-only` steps can rebuild them

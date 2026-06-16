@@ -22,6 +22,14 @@ desktop/node_modules/
 desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/schemas/
+desktop/src-tauri/resources/musicidx-bin/*
+!desktop/src-tauri/resources/musicidx-bin/.gitkeep
+desktop/src-tauri/resources/models/*
+!desktop/src-tauri/resources/models/.gitkeep
+desktop/src-tauri/resources/bin/*
+!desktop/src-tauri/resources/bin/.gitkeep
+desktop/src-tauri/resources/lib/*
+!desktop/src-tauri/resources/lib/.gitkeep
 
 # Test/coverage artifacts
 .pytest_cache/

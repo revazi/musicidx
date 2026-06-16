@@ -100,6 +100,7 @@ type SettingsState = {
   indexResourceProfile: string;
   backgroundIndexingEnabled: boolean;
   backgroundIndexIntervalMinutes: number;
+  backgroundIndexResourceProfile: string;
 };
 
 type IndexStep = {
@@ -160,6 +161,7 @@ const defaultSettings: SettingsState = {
   indexResourceProfile: "auto",
   backgroundIndexingEnabled: true,
   backgroundIndexIntervalMinutes: DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES,
+  backgroundIndexResourceProfile: "balanced",
 };
 
 export default function App() {
@@ -262,6 +264,77 @@ export default function App() {
     [settings.indexResourceProfile, settings.musicFolder, settings.semanticModel],
   );
 
+  const backgroundIndexSteps = useMemo<IndexStep[]>(
+    () => [
+      {
+        id: "scan",
+        label: "Scan files",
+        args: () => ["scan", required(settings.musicFolder, "Music folder"), "--json"],
+      },
+      {
+        id: "metadata",
+        label: "Read metadata",
+        args: () => ["metadata", "--missing-only", "--json"],
+      },
+      {
+        id: "fingerprint",
+        label: "Fingerprint",
+        args: () => ["fingerprint", "--missing-only", "--json"],
+      },
+      {
+        id: "basic",
+        label: "Audio features",
+        args: () => [
+          "analyze-basic",
+          "--quick",
+          "--chunked",
+          "--chunk-sec",
+          "auto",
+          "--workers",
+          "auto",
+          "--resource-profile",
+          settings.backgroundIndexResourceProfile,
+          "--json",
+        ],
+      },
+      {
+        id: "tags",
+        label: "ML tags",
+        args: () => [
+          "analyze-tags",
+          "--missing-only",
+          "--workers",
+          "auto",
+          "--resource-profile",
+          settings.backgroundIndexResourceProfile,
+          "--subprocess-batches",
+          "--batch-size",
+          "auto",
+          "--json",
+        ],
+      },
+      {
+        id: "embed",
+        label: "Profile embeddings",
+        args: () => {
+          const args = [
+            "embed",
+            "--batch-size",
+            "auto",
+            "--resource-profile",
+            settings.backgroundIndexResourceProfile,
+            "--json",
+          ];
+          if (settings.semanticModel.trim()) {
+            args.splice(1, 0, "--model", settings.semanticModel.trim());
+          }
+          return args;
+        },
+      },
+    ],
+    [settings.backgroundIndexResourceProfile, settings.musicFolder, settings.semanticModel],
+  );
+
   const pipelinePercent = Math.round((pipelineCompleted / indexSteps.length) * 100);
   const effectiveTheme = settings.themeMode === "system" ? systemTheme : settings.themeMode;
   const backgroundIndexIntervalMinutes = normalizeBackgroundIndexIntervalMinutes(
@@ -309,7 +382,9 @@ export default function App() {
       return undefined;
     }
 
-    setBackgroundStatus(`Background watcher idle · checks every ${backgroundIndexIntervalLabel}`);
+    setBackgroundStatus(
+      `Background watcher idle · checks every ${backgroundIndexIntervalLabel} · ${settings.backgroundIndexResourceProfile} profile`,
+    );
     const interval = window.setInterval(() => {
       if (!busyRef.current && !pipelineRunningRef.current) {
         void runBackgroundCheck();
@@ -327,7 +402,7 @@ export default function App() {
     settings.ffprobePath,
     settings.fpcalcPath,
     settings.semanticModel,
-    settings.indexResourceProfile,
+    settings.backgroundIndexResourceProfile,
     backgroundIndexIntervalMs,
     backgroundIndexIntervalLabel,
   ]);
@@ -381,7 +456,7 @@ export default function App() {
     setCanceling(false);
     try {
       setBackgroundStatus("Background watcher checking for changes…");
-      const scanStep = indexSteps[0];
+      const scanStep = backgroundIndexSteps[0];
       const scanPayload = await runJsonCommand<IndexCommandPayload>(scanStep.args());
       const checkedAt = formatClock(new Date());
       const changeCount = scanChangeCount(scanPayload);
@@ -417,7 +492,7 @@ export default function App() {
       setPipelineStep("Background changes detected");
       setPipelineSummaries([summarizeIndexStep(scanStep, scanPayload)]);
 
-      const remainingSteps = indexSteps.slice(1);
+      const remainingSteps = backgroundIndexSteps.slice(1);
       for (const [index, step] of remainingSteps.entries()) {
         setPipelineStep(`Background: ${step.label}`);
         const payload = await runJsonCommand<IndexCommandPayload>(step.args());
@@ -460,6 +535,16 @@ export default function App() {
         const payload = await runJsonCommand<IndexCommandPayload>(step.args());
         setPipelineSummaries((current) => [...current, summarizeIndexStep(step, payload)]);
         setPipelineCompleted(index + 1);
+        if (step.id === "scan" && payload.root_missing) {
+          const message =
+            (payload.missing ?? 0) > 0
+              ? `Music folder not found · ${describeScanChanges(payload)} marked missing`
+              : "Music folder not found · no active tracks to mark missing";
+          setPipelineStep("Music folder not found");
+          setBackgroundStatus(`${message} · ${formatClock(new Date())}`);
+          updateStatus("Music folder not found; update the folder path in Settings", true);
+          return;
+        }
       }
       setPipelineStep("Complete");
       updateStatus("Indexing complete");
@@ -901,7 +986,7 @@ export default function App() {
                   <option value="light">Light</option>
                 </select>
               </Field>
-              <Field label="Indexing resource profile">
+              <Field label="Manual indexing resource profile">
                 <select
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   value={settings.indexResourceProfile}
@@ -913,8 +998,23 @@ export default function App() {
                   <option value="full">Full</option>
                 </select>
               </Field>
-              <div className="rounded-lg border bg-muted p-3 text-sm text-muted-foreground">
-                Auto scales workers/batch size from RAM/CPU. ML tags stay serial for now to avoid TensorFlow memory spikes.
+              <Field label="Background indexing resource profile">
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={settings.backgroundIndexResourceProfile}
+                  disabled={!settings.backgroundIndexingEnabled}
+                  onChange={(event) =>
+                    updateSettings({ backgroundIndexResourceProfile: event.target.value })
+                  }
+                >
+                  <option value="auto">Auto</option>
+                  <option value="low">Low impact</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="full">Full</option>
+                </select>
+              </Field>
+              <div className="rounded-lg border bg-muted p-3 text-sm text-muted-foreground md:col-span-2">
+                Background auto-indexing defaults to Balanced: faster than conservative Auto/Low, but less aggressive than Full. ML tags stay serial to avoid TensorFlow memory spikes.
               </div>
               <Field label="Working directory" className="md:col-span-2">
                 <PathInput

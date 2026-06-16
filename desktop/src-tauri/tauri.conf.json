@@ -26,6 +26,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "category": "Music"
+    "category": "Music",
+    "resources": [
+      "resources/musicidx-bin/**/*",
+      "resources/models/**/*",
+      "resources/bin/**/*",
+      "resources/lib/**/*"
+    ]
   }
 }
