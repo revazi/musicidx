@@ -42,6 +42,228 @@ def test_parse_intent_uses_library_tags_and_feature_ranges(tmp_path):
         conn.close()
 
 
+def test_parse_intent_detects_highest_bpm_sort(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "fast-track",
+            tmp_path / "fast.mp3",
+            profile_text="fast dance",
+            tags=[("essentia:mood", "energetic", 0.9)],
+            energy=0.80,
+            aggression=0.40,
+            danceability=0.90,
+            bpm=150.0,
+        )
+
+        intent = parse_intent_dynamic("give me the 3 highest BPM tracks", conn)
+
+        assert intent.limit == 3
+        assert intent.sort_by[0].field == "tempo_bpm"
+        assert intent.sort_by[0].direction == "desc"
+        assert intent.feature_ranges["tempo_bpm"].source.endswith("very_high")
+    finally:
+        conn.close()
+
+
+def test_search_music_sorts_by_highest_bpm(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "slow-track",
+            tmp_path / "slow.mp3",
+            title="Slow",
+            artist="Artist A",
+            profile_text="slow song",
+            tags=[("essentia:mood", "calm", 0.9)],
+            energy=0.20,
+            aggression=0.10,
+            danceability=0.20,
+            bpm=80.0,
+        )
+        _insert_track(
+            conn,
+            "mid-track",
+            tmp_path / "mid.mp3",
+            title="Mid",
+            artist="Artist B",
+            profile_text="mid tempo",
+            tags=[("essentia:mood", "upbeat", 0.9)],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.60,
+            bpm=120.0,
+        )
+        _insert_track(
+            conn,
+            "fast-track",
+            tmp_path / "fast.mp3",
+            title="Fast",
+            artist="Artist C",
+            profile_text="fast dance",
+            tags=[("essentia:mood", "energetic", 0.9)],
+            energy=0.90,
+            aggression=0.30,
+            danceability=0.95,
+            bpm=155.0,
+        )
+
+        response = search_music(conn, "highest BPM", explain=True)
+
+        assert [result.track_id for result in response.results] == [
+            "fast-track",
+            "mid-track",
+            "slow-track",
+        ]
+        assert response.diagnostics["sort_by"] == [
+            {"field": "tempo_bpm", "direction": "desc", "source": "natural_language"}
+        ]
+        assert "sorted by highest BPM" in "; ".join(response.results[0].explanation)
+    finally:
+        conn.close()
+
+
+def test_search_music_returns_normalized_relevance_score(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "strong-track",
+            tmp_path / "strong.mp3",
+            title="Strong",
+            artist="Artist A",
+            profile_text="relaxing ambient background",
+            tags=[("essentia:mood", "relaxing", 0.9)],
+            energy=0.25,
+            aggression=0.10,
+            danceability=0.40,
+            bpm=90.0,
+        )
+        _insert_track(
+            conn,
+            "weaker-track",
+            tmp_path / "weak.mp3",
+            title="Weak",
+            artist="Artist B",
+            profile_text="relaxing",
+            tags=[("essentia:mood", "relaxing", 0.45)],
+            energy=0.40,
+            aggression=0.20,
+            danceability=0.40,
+            bpm=100.0,
+        )
+
+        response = search_music(conn, "chill", explain=True)
+
+        assert response.results[0].score == 1.0
+        assert response.results[0].breakdown["raw_score"] < 1.0
+        assert response.results[0].breakdown["display_score"] == 1.0
+        assert response.diagnostics["score_normalization"] == "relative_to_top_result"
+        assert response.diagnostics["top_raw_score"] == response.results[0].breakdown["raw_score"]
+        assert (
+            response.results[0].breakdown["raw_score"]
+            >= response.results[1].breakdown["raw_score"]
+        )
+    finally:
+        conn.close()
+
+
+def test_parse_intent_expands_upbeat_dance_without_llm(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "dance-track",
+            tmp_path / "dance.mp3",
+            profile_text="high energy high danceability",
+            tags=[("essentia:genre", "electronic---house", 0.85)],
+            energy=0.85,
+            aggression=0.30,
+            danceability=0.90,
+            bpm=126.0,
+        )
+
+        intent = parse_intent_dynamic("upbeat dance music", conn)
+
+        assert "happy" in intent.contexts
+        assert "energy" in intent.feature_ranges
+        assert "danceability" in intent.feature_ranges
+        assert "electronic---house" in intent.prefer_tags
+    finally:
+        conn.close()
+
+
+def test_search_music_uses_feature_priors_for_upbeat_without_exact_tags(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "upbeat-track",
+            tmp_path / "upbeat.mp3",
+            title="Movement",
+            artist="Artist A",
+            profile_text="high energy high danceability tempo around 126 bpm",
+            tags=[("essentia:genre", "electronic---house", 0.85)],
+            energy=0.88,
+            aggression=0.35,
+            danceability=0.92,
+            bpm=126.0,
+        )
+        _insert_track(
+            conn,
+            "slow-track",
+            tmp_path / "slow.mp3",
+            title="Still",
+            artist="Artist B",
+            profile_text="low energy low danceability slow acoustic ballad",
+            tags=[("essentia:mood", "sad", 0.85)],
+            energy=0.18,
+            aggression=0.10,
+            danceability=0.15,
+            bpm=72.0,
+        )
+
+        response = search_music(conn, "upbeat dance music", explain=True)
+
+        assert [result.track_id for result in response.results] == ["upbeat-track"]
+        assert response.results[0].breakdown["feature_score"] > 0.8
+        assert response.diagnostics["weights"]["features"] > 0.30
+    finally:
+        conn.close()
+
+
+def test_parse_intent_handles_not_aggressive_as_negative_feature(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "soft-track",
+            tmp_path / "soft.mp3",
+            profile_text="soft calm",
+            tags=[("essentia:mood", "calm", 0.8)],
+            energy=0.25,
+            aggression=0.10,
+            danceability=0.30,
+            bpm=82.0,
+        )
+
+        intent = parse_intent_dynamic("not aggressive background", conn)
+
+        assert "aggressive" in intent.avoid_tag_concepts
+        assert "aggressive" not in intent.prefer_tag_concepts
+        assert intent.feature_ranges["aggression"].source.endswith("low")
+    finally:
+        conn.close()
+
+
 def test_search_music_ranks_library_aware_chill_match_first(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
@@ -78,8 +300,7 @@ def test_search_music_ranks_library_aware_chill_match_first(tmp_path):
 
         response = search_music(conn, "chill bar", explain=True)
 
-        assert response.results[0].track_id == "chill-track"
-        assert response.results[0].score > response.results[1].score
+        assert [result.track_id for result in response.results] == ["chill-track"]
         assert response.results[0].explanation
 
         payload = _search_payload(response, db_path="index.sqlite", concise=True)
@@ -89,6 +310,110 @@ def test_search_music_ranks_library_aware_chill_match_first(tmp_path):
         assert payload["results"][0]["track_id"] == "chill-track"
         assert "breakdown" not in payload["results"][0]
         assert payload["results"][0]["why"]
+    finally:
+        conn.close()
+
+
+def test_search_music_prefers_mood_evidence_over_feature_only_matches(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "feature-only-track",
+            tmp_path / "feature-only.mp3",
+            title="Feature Only",
+            artist="Artist A",
+            profile_text="low energy low brightness low aggression",
+            tags=[("essentia:mood", "neutral", 0.9)],
+            energy=0.10,
+            aggression=0.10,
+            danceability=0.20,
+            bpm=75.0,
+        )
+        _insert_track(
+            conn,
+            "sad-evidence-track",
+            tmp_path / "sad.mp3",
+            title="Sad Evidence",
+            artist="Artist B",
+            profile_text="sad reflective melancholic song",
+            tags=[("essentia:mood", "sad", 0.85)],
+            energy=0.60,
+            aggression=0.30,
+            danceability=0.40,
+            bpm=90.0,
+        )
+
+        response = search_music(conn, "sad reflective melancholic songs", explain=True)
+
+        assert [result.track_id for result in response.results] == ["sad-evidence-track"]
+        assert response.results[0].breakdown["text_score"] > 0
+    finally:
+        conn.close()
+
+
+def test_search_music_filters_unmatched_local_library_candidates(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "unrelated-track",
+            tmp_path / "unrelated.mp3",
+            title="Unrelated",
+            artist="Artist A",
+            profile_text="slow acoustic ballad",
+            tags=[("essentia:mood", "sad", 0.8)],
+            energy=0.20,
+            aggression=0.10,
+            danceability=0.10,
+            bpm=70.0,
+        )
+
+        response = search_music(conn, "galactic pirate polka", explain=True)
+
+        assert response.results == []
+        assert response.diagnostics["filtered_candidate_count"] == 0
+    finally:
+        conn.close()
+
+
+def test_search_music_discounts_low_confidence_best_guess_tags(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "weak-tag-track",
+            tmp_path / "weak.mp3",
+            title="Weak Guess",
+            artist="Artist A",
+            profile_text="unrelated filler",
+            tags=[("essentia:mood", "energetic", 0.05)],
+            energy=0.10,
+            aggression=0.10,
+            danceability=0.10,
+            bpm=70.0,
+        )
+        _insert_track(
+            conn,
+            "strong-tag-track",
+            tmp_path / "strong.mp3",
+            title="Strong Match",
+            artist="Artist B",
+            profile_text="energetic dance floor party",
+            tags=[("essentia:mood", "energetic", 0.85)],
+            energy=0.90,
+            aggression=0.50,
+            danceability=0.95,
+            bpm=128.0,
+        )
+
+        response = search_music(conn, "energetic dance", explain=True)
+
+        assert [result.track_id for result in response.results] == ["strong-tag-track"]
+        assert response.diagnostics["minimum_ranking_tag_score"] == 0.20
     finally:
         conn.close()
 
@@ -197,8 +522,8 @@ def test_eval_command_reports_search_quality_metrics(tmp_path):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["summary"]["query_count"] == 1
-    assert payload["results"][0]["precision_at_k"] == 0.5
-    assert payload["results"][0]["avoid_rate"] == 0.5
+    assert payload["results"][0]["precision_at_k"] == 1.0
+    assert payload["results"][0]["avoid_rate"] == 0.0
     assert payload["results"][0]["tag_coverage"] == 1.0
 
 

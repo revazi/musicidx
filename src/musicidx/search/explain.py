@@ -34,6 +34,9 @@ def build_explanation(breakdown: dict[str, Any]) -> list[str]:
     if text_score is not None and text_score > 0:
         lines.append(f"text/profile match {text_score:.2f}")
 
+    sort_lines = _sort_explanations(breakdown)
+    lines.extend(sort_lines)
+
     feedback_score = breakdown.get("feedback_score")
     if feedback_score is not None and feedback_score > 0:
         lines.append(f"positive feedback boost {feedback_score:.2f}")
@@ -43,3 +46,31 @@ def build_explanation(breakdown: dict[str, Any]) -> list[str]:
     if not lines:
         lines.append("included as a local-library candidate")
     return lines
+
+
+def _sort_explanations(breakdown: dict[str, Any]) -> list[str]:
+    sort_specs = breakdown.get("sort_by") or []
+    sort_values = breakdown.get("sort_values") or {}
+    output: list[str] = []
+    labels = {
+        "tempo_bpm": "BPM",
+        "energy": "energy",
+        "danceability": "danceability",
+        "aggression": "aggression",
+        "brightness": "brightness",
+    }
+    for spec in sort_specs[:2]:
+        if not isinstance(spec, dict):
+            continue
+        field = spec.get("field")
+        direction = spec.get("direction")
+        if not isinstance(field, str) or not isinstance(direction, str):
+            continue
+        value = sort_values.get(field)
+        label = labels.get(field, field)
+        descriptor = "highest" if direction == "desc" else "lowest"
+        if isinstance(value, int | float):
+            output.append(f"sorted by {descriptor} {label}: {value:.2f}")
+        else:
+            output.append(f"sorted by {descriptor} {label}")
+    return output

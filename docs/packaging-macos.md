@@ -8,8 +8,8 @@ The all-in-one bundle includes:
 - a PyInstaller-built `musicidx` Python CLI backend
 - installed Python dependencies, including semantic/ML extras
 - local `.musicidx-models` files
-- `ffprobe` and `fpcalc`
-- best-effort bundled Homebrew dylib dependencies for `ffprobe`/`fpcalc`
+- `ffmpeg`, `ffprobe`, and `fpcalc`
+- best-effort bundled Homebrew dylib dependencies for `ffmpeg`/`ffprobe`/`fpcalc`
 
 The packaged app stores its runtime DB in the macOS app-data directory, not the repo:
 
@@ -98,6 +98,7 @@ MUSICIDX_MODELS_SOURCE=/path/to/.musicidx-models \
 If you want to provide custom/self-contained helper binaries:
 
 ```bash
+MUSICIDX_FFMPEG_SOURCE=/path/to/ffmpeg \
 MUSICIDX_FFPROBE_SOURCE=/path/to/ffprobe \
 MUSICIDX_FPCALC_SOURCE=/path/to/fpcalc \
   npm --prefix desktop run package:mac:all-in-one
@@ -118,6 +119,6 @@ For public distribution, add Apple Developer signing and notarization later.
 
 ## Notes
 
-The script bundles Homebrew `ffprobe`/`fpcalc` dylib dependencies using `otool` and `install_name_tool`. This is best-effort and should be tested on a clean Mac account/machine before sharing widely.
+The script bundles Homebrew `ffmpeg`/`ffprobe`/`fpcalc` dylib dependencies using `otool` and `install_name_tool`. This is best-effort and should be tested on a clean Mac account/machine before sharing widely.
 
-If the bundled audio helper binaries fail on the target Mac, rebuild using known self-contained/static `ffprobe` and `fpcalc` binaries via `MUSICIDX_FFPROBE_SOURCE` and `MUSICIDX_FPCALC_SOURCE`.
+If the bundled audio helper binaries fail on the target Mac, rebuild using known self-contained/static `ffmpeg`, `ffprobe`, and `fpcalc` binaries via `MUSICIDX_FFMPEG_SOURCE`, `MUSICIDX_FFPROBE_SOURCE`, and `MUSICIDX_FPCALC_SOURCE`.

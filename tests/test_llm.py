@@ -21,6 +21,11 @@ def test_intent_hints_from_json_sanitizes_invalid_values():
                 "unknown": "high",
                 "brightness": "invalid",
             },
+            "sort_by": [
+                {"field": "bpm", "direction": "desc"},
+                {"field": "unknown", "direction": "asc"},
+                {"field": "energy", "direction": "sideways"},
+            ],
             "notes": "library-aware intent",
         }
     )
@@ -30,6 +35,9 @@ def test_intent_hints_from_json_sanitizes_invalid_values():
     assert hints.prefer_tag_concepts == ["ambient", "deep"]
     assert hints.avoid_tag_concepts == ["aggressive"]
     assert hints.feature_preferences == {"energy": "low_mid", "tempo_bpm": "mid"}
+    assert [sort.as_dict() for sort in hints.sort_by] == [
+        {"field": "tempo_bpm", "direction": "desc", "source": "llm"}
+    ]
     assert hints.notes == "library-aware intent"
 
 
@@ -52,6 +60,7 @@ def test_parse_intent_gemini_uses_generate_content(monkeypatch):
                     "prefer_tag_concepts": ["ambient", "background"],
                     "avoid_tag_concepts": ["aggressive"],
                     "feature_preferences": {"energy": "low_mid", "aggression": "low"},
+                    "sort_by": [{"field": "tempo_bpm", "direction": "desc"}],
                     "notes": "gemini test",
                 }
             )
@@ -77,11 +86,20 @@ def test_parse_intent_gemini_uses_generate_content(monkeypatch):
     assert "models/gemini-test:generateContent" in captured["url"]
     assert "key=test-gemini-key" in captured["url"]
     assert captured["timeout"] == 6
+    system_prompt = captured["body"]["systemInstruction"]["parts"][0]["text"]
     assert captured["body"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert "Always produce a usable music search intent" in system_prompt
+    assert (
+        "Do not return empty hints unless the user explicitly asks not to search"
+        in system_prompt
+    )
     assert hints.limit == 8
     assert hints.contexts == ["focus"]
     assert hints.prefer_tag_concepts == ["ambient", "background"]
     assert hints.feature_preferences == {"energy": "low_mid", "aggression": "low"}
+    assert [sort.as_dict() for sort in hints.sort_by] == [
+        {"field": "tempo_bpm", "direction": "desc", "source": "llm"}
+    ]
 
 
 def test_parse_intent_gemini_falls_back_when_configured_model_is_retired(monkeypatch):
@@ -171,7 +189,13 @@ def test_parse_intent_openai_uses_chat_completions(monkeypatch):
 
     assert captured["url"] == "https://api.openai.com/v1/chat/completions"
     assert captured["timeout"] == 5
+    system_prompt = captured["body"]["messages"][0]["content"]
     assert captured["body"]["model"] == "gpt-test"
+    assert "Always produce a usable music search intent" in system_prompt
+    assert (
+        "Do not return empty hints unless the user explicitly asks not to search"
+        in system_prompt
+    )
     assert captured["auth"] == "Bearer test-key"
     assert hints.limit == 7
     assert hints.contexts == ["chill"]

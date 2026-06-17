@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -8,6 +8,8 @@ import {
   ChevronDown,
   Database,
   Download,
+  SkipBack,
+  SkipForward,
   FolderOpen,
   ListChecks,
   Loader2,
@@ -44,6 +46,12 @@ type MusicidxOutput = {
   stderr: string;
 };
 
+type PlaybackSource = {
+  path: string;
+  transcoded: boolean;
+  detail: string;
+};
+
 type MusicidxStreamEvent = {
   request_id: string;
   stream: "stdout" | "stderr" | "status";
@@ -57,6 +65,8 @@ type DesktopState = {
   current_dir: string;
   cli_path: string;
   prefix_args: string;
+  models_path?: string;
+  semantic_model?: string;
 };
 
 type SearchResult = {
@@ -81,6 +91,7 @@ type SearchPayload = {
 };
 
 type ThemeMode = "system" | "light" | "dark";
+type IndexAnalysisMode = "quality" | "full";
 
 type SettingsState = {
   cwd: string;
@@ -98,6 +109,7 @@ type SettingsState = {
   exportPath: string;
   themeMode: ThemeMode;
   indexResourceProfile: string;
+  indexAnalysisMode: IndexAnalysisMode;
   backgroundIndexingEnabled: boolean;
   backgroundIndexIntervalMinutes: number;
   backgroundIndexResourceProfile: string;
@@ -125,6 +137,7 @@ type IndexCommandPayload = {
   root_missing?: boolean;
   batches?: number;
   batch_size?: number;
+  quick?: boolean;
   chunked?: boolean;
   chunk_sec?: number;
   workers?: number;
@@ -159,6 +172,7 @@ const defaultSettings: SettingsState = {
   exportPath: "",
   themeMode: "system",
   indexResourceProfile: "auto",
+  indexAnalysisMode: "quality",
   backgroundIndexingEnabled: true,
   backgroundIndexIntervalMinutes: DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES,
   backgroundIndexResourceProfile: "balanced",
@@ -178,6 +192,10 @@ export default function App() {
   const [statusError, setStatusError] = useState(false);
   const [rawOutput, setRawOutput] = useState("Ready.");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [playerTrack, setPlayerTrack] = useState<SearchResult | null>(null);
+  const [playerSrc, setPlayerSrc] = useState("");
+  const [playerError, setPlayerError] = useState("");
+  const [playerUsingFallback, setPlayerUsingFallback] = useState(false);
   const [advancedIndexing, setAdvancedIndexing] = useState(false);
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineMode, setPipelineMode] = useState<"manual" | "background" | null>(null);
@@ -188,6 +206,7 @@ export default function App() {
   const [settingsSaveStatus, setSettingsSaveStatus] = useState("");
   const [canceling, setCanceling] = useState(false);
   const currentRequestIdRef = useRef<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const cancelRequestedRef = useRef(false);
   const backgroundJobRunningRef = useRef(false);
   const busyRef = useRef(false);
@@ -213,18 +232,7 @@ export default function App() {
       {
         id: "basic",
         label: "Audio features",
-        args: () => [
-          "analyze-basic",
-          "--quick",
-          "--chunked",
-          "--chunk-sec",
-          "auto",
-          "--workers",
-          "auto",
-          "--resource-profile",
-          settings.indexResourceProfile,
-          "--json",
-        ],
+        args: () => basicAnalysisArgs(settings.indexAnalysisMode, settings.indexResourceProfile),
       },
       {
         id: "tags",
@@ -261,7 +269,12 @@ export default function App() {
         },
       },
     ],
-    [settings.indexResourceProfile, settings.musicFolder, settings.semanticModel],
+    [
+      settings.indexAnalysisMode,
+      settings.indexResourceProfile,
+      settings.musicFolder,
+      settings.semanticModel,
+    ],
   );
 
   const backgroundIndexSteps = useMemo<IndexStep[]>(
@@ -286,7 +299,6 @@ export default function App() {
         label: "Audio features",
         args: () => [
           "analyze-basic",
-          "--quick",
           "--chunked",
           "--chunk-sec",
           "auto",
@@ -364,6 +376,17 @@ export default function App() {
   }, [pipelineRunning]);
 
   useEffect(() => {
+    if (!playerSrc || !audioRef.current) {
+      return;
+    }
+    audioRef.current.load();
+    void audioRef.current.play().catch((error) => {
+      writeRaw(error);
+      updateStatus("Could not play track in MusicIdx", true);
+    });
+  }, [playerSrc]);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", effectiveTheme === "dark");
     document.documentElement.classList.toggle("light", effectiveTheme === "light");
     document.documentElement.style.colorScheme = effectiveTheme;
@@ -416,6 +439,8 @@ export default function App() {
         cwd: saved.cwd || state.current_dir,
         cliPath: saved.cliPath || state.cli_path,
         prefixArgs: saved.prefixArgs || state.prefix_args,
+        modelsPath: saved.modelsPath || state.models_path || "",
+        semanticModel: packagedSemanticModelDefault(saved.semanticModel, state.semantic_model),
       });
       updateStatus("Ready");
     } catch (error) {
@@ -671,6 +696,75 @@ export default function App() {
     ];
     await runJsonCommand(args);
     updateStatus(`Saved ${rating} feedback`);
+  }
+
+  async function playTrack(result: SearchResult) {
+    const title = result.title || result.path.split(/[\\/]/).pop() || "track";
+    try {
+      setPlayerError("");
+      setPlayerUsingFallback(false);
+      setPlayerTrack(result);
+      setPlayerSrc(convertFileSrc(result.path));
+      updateStatus(`Playing ${title}`);
+    } catch (error) {
+      writeRaw(error);
+      updateStatus("Could not prepare track for playback", true);
+    }
+  }
+
+  function playAdjacentTrack(direction: -1 | 1) {
+    if (!playerTrack || results.length === 0) {
+      return;
+    }
+    const currentIndex = results.findIndex((result) => result.track_id === playerTrack.track_id);
+    if (currentIndex < 0) {
+      return;
+    }
+    const nextIndex = currentIndex + direction;
+    const nextTrack = results[nextIndex];
+    if (nextTrack) {
+      void playTrack(nextTrack);
+    }
+  }
+
+  async function revealTrack(result: SearchResult) {
+    try {
+      await invoke<void>("reveal_track", { path: result.path });
+      updateStatus("Revealed track in file manager");
+    } catch (error) {
+      writeRaw(error);
+      updateStatus("Could not reveal track", true);
+    }
+  }
+
+  async function preparePlaybackFallback(result: SearchResult, reason: string) {
+    if (playerUsingFallback) {
+      setPlayerError(reason);
+      return;
+    }
+    try {
+      setPlayerError("Preparing playable preview with ffmpeg…");
+      const fallback = await invoke<PlaybackSource>("prepare_playback_fallback", { path: result.path });
+      setPlayerUsingFallback(true);
+      setPlayerSrc(convertFileSrc(fallback.path));
+      setPlayerError("");
+      updateStatus("Playing transcoded preview");
+    } catch (error) {
+      const message = `${reason}; fallback failed: ${formatValue(error)}`;
+      setPlayerError(message);
+      writeRaw(error);
+      updateStatus("Could not prepare playable preview", true);
+    }
+  }
+
+  async function openTrackExternally(result: SearchResult) {
+    try {
+      await invoke<void>("open_track", { path: result.path });
+      updateStatus("Opening track in system player");
+    } catch (error) {
+      writeRaw(error);
+      updateStatus("Could not open track externally", true);
+    }
   }
 
   async function chooseDirectory(field: keyof SettingsState) {
@@ -986,6 +1080,18 @@ export default function App() {
                   <option value="light">Light</option>
                 </select>
               </Field>
+              <Field label="Manual indexing type">
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={settings.indexAnalysisMode}
+                  onChange={(event) =>
+                    updateSettings({ indexAnalysisMode: event.target.value as IndexAnalysisMode })
+                  }
+                >
+                  <option value="quality">Full-track: chunked safe</option>
+                  <option value="full">Full-track: larger chunks</option>
+                </select>
+              </Field>
               <Field label="Manual indexing resource profile">
                 <select
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -1014,7 +1120,7 @@ export default function App() {
                 </select>
               </Field>
               <div className="rounded-lg border bg-muted p-3 text-sm text-muted-foreground md:col-span-2">
-                Background auto-indexing defaults to Balanced: faster than conservative Auto/Low, but less aggressive than Full. ML tags stay serial to avoid TensorFlow memory spikes.
+                MusicIdx now avoids quick sampling by default. Manual and background indexing analyze the whole file in chunks; larger chunks trade memory for fewer decoder passes.
               </div>
               <Field label="Working directory" className="md:col-span-2">
                 <PathInput
@@ -1217,6 +1323,9 @@ export default function App() {
                   index={index}
                   busy={busy}
                   onFeedback={saveFeedback}
+                  onPlay={playTrack}
+                  onReveal={revealTrack}
+                  playingTrackId={playerTrack?.track_id ?? null}
                 />
               ))}
             </div>
@@ -1237,6 +1346,84 @@ export default function App() {
           {rawOutput}
         </pre>
       </details>
+
+      {playerTrack ? (
+        <div className="fixed bottom-20 right-4 z-40 w-[min(calc(100vw-2rem),28rem)] rounded-xl border bg-card/90 p-4 shadow-xl backdrop-blur-md">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Now playing</p>
+              <p className="wrap-anywhere text-sm font-semibold">
+                {playerTrack.title || playerTrack.path.split(/[\\/]/).pop() || playerTrack.track_id}
+              </p>
+              <p className="wrap-anywhere text-xs text-muted-foreground">
+                {[playerTrack.artist, playerTrack.album].filter(Boolean).join(" · ") || playerTrack.path}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                audioRef.current?.pause();
+                setPlayerTrack(null);
+                setPlayerSrc("");
+                setPlayerError("");
+                setPlayerUsingFallback(false);
+              }}
+            >
+              Close
+            </Button>
+          </div>
+          <div className="grid gap-2">
+            <audio
+              key={playerSrc}
+              ref={audioRef}
+              controls
+              preload="metadata"
+              className="w-full"
+              onEnded={() => playAdjacentTrack(1)}
+              onError={() => {
+                const detail = describeAudioError(audioRef.current);
+                if (playerTrack) {
+                  void preparePlaybackFallback(playerTrack, detail);
+                } else {
+                  setPlayerError(detail);
+                  updateStatus(detail, true);
+                }
+              }}
+            >
+              <source src={playerSrc} type={audioMimeType(playerTrack.path)} />
+            </audio>
+            {playerError ? (
+              <div className="grid gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
+                <p className="wrap-anywhere">{playerError}</p>
+                <Button size="sm" variant="outline" onClick={() => void openTrackExternally(playerTrack)}>
+                  Open externally
+                </Button>
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!hasAdjacentTrack(results, playerTrack, -1)}
+                onClick={() => playAdjacentTrack(-1)}
+              >
+                <SkipBack className="h-3.5 w-3.5" />
+                Previous
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!hasAdjacentTrack(results, playerTrack, 1)}
+                onClick={() => playAdjacentTrack(1)}
+              >
+                Next
+                <SkipForward className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {pipelineRunning && (
         <div className="fixed bottom-20 left-4 z-40 w-[min(calc(100vw-2rem),20rem)] rounded-xl border bg-card/85 p-4 shadow-xl backdrop-blur-md">
@@ -1431,11 +1618,17 @@ function ResultCard({
   index,
   busy,
   onFeedback,
+  onPlay,
+  onReveal,
+  playingTrackId,
 }: {
   result: SearchResult;
   index: number;
   busy: boolean;
   onFeedback: (result: SearchResult, rating: "good" | "bad" | "neutral") => Promise<void>;
+  onPlay: (result: SearchResult) => Promise<void>;
+  onReveal: (result: SearchResult) => Promise<void>;
+  playingTrackId: string | null;
 }) {
   const [savedRating, setSavedRating] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -1447,6 +1640,7 @@ function ResultCard({
     : "";
   const hasLongContent =
     why.length > 180 || tagText.length > 140 || result.path.length > 120 || title.length > 80;
+  const isPlaying = playingTrackId === result.track_id;
 
   async function rate(rating: "good" | "bad" | "neutral") {
     await onFeedback(result, rating);
@@ -1491,18 +1685,30 @@ function ResultCard({
           {expanded ? "Show less" : "Show full result"}
         </Button>
       ) : null}
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" disabled={busy || savedRating === "good"} onClick={() => rate("good")}>
-          {savedRating === "good" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <ThumbsUp className="h-3.5 w-3.5" />}
-          Good
-        </Button>
-        <Button size="sm" variant="outline" disabled={busy || savedRating === "bad"} onClick={() => rate("bad")}>
-          <ThumbsDown className="h-3.5 w-3.5" />
-          Bad
-        </Button>
-        <Button size="sm" variant="ghost" disabled={busy || savedRating === "neutral"} onClick={() => rate("neutral")}>
-          Neutral
-        </Button>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant={isPlaying ? "default" : "secondary"} onClick={() => void onPlay(result)}>
+            <Play className="h-3.5 w-3.5" />
+            {isPlaying ? "Playing" : "Play"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => void onReveal(result)}>
+            <FolderOpen className="h-3.5 w-3.5" />
+            Show
+          </Button>
+        </div>
+        <div className="flex flex-wrap gap-2 sm:justify-end">
+          <Button size="sm" variant="outline" disabled={busy || savedRating === "good"} onClick={() => rate("good")}>
+            {savedRating === "good" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <ThumbsUp className="h-3.5 w-3.5" />}
+            Good
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy || savedRating === "bad"} onClick={() => rate("bad")}>
+            <ThumbsDown className="h-3.5 w-3.5" />
+            Bad
+          </Button>
+          <Button size="sm" variant="ghost" disabled={busy || savedRating === "neutral"} onClick={() => rate("neutral")}>
+            Neutral
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -1524,7 +1730,10 @@ function summarizeIndexStep(step: IndexStep, payload: IndexCommandPayload): Pipe
     payload.peak_memory_mb ? `${payload.peak_memory_mb}MB peak` : null,
     payload.child_peak_memory_mb ? `${payload.child_peak_memory_mb}MB child peak` : null,
     payload.workers ? `${payload.workers} worker${payload.workers === 1 ? "" : "s"}` : null,
-    payload.chunked ? `chunked ${payload.chunk_sec ?? "auto"}s` : null,
+    payload.quick ? "first 120s sample" : null,
+    payload.chunked
+      ? `${payload.quick ? "sample" : "full track"} chunks ${payload.chunk_sec ?? "auto"}s`
+      : null,
     payload.batch_size ? `batch ${payload.batch_size}` : null,
   ].filter(Boolean);
   return {
@@ -1537,6 +1746,13 @@ function summarizeIndexStep(step: IndexStep, payload: IndexCommandPayload): Pipe
 
 function formatCount(label: string, value: number | undefined): string | null {
   return value === undefined ? null : `${value} ${label}`;
+}
+
+function basicAnalysisArgs(mode: IndexAnalysisMode, resourceProfile: string): string[] {
+  const args = ["analyze-basic"];
+  args.push("--chunked", "--chunk-sec", mode === "full" ? "300" : "auto");
+  args.push("--workers", "auto", "--resource-profile", resourceProfile, "--json");
+  return args;
 }
 
 function scanChangeCount(payload: IndexCommandPayload): number {
@@ -1587,6 +1803,7 @@ function loadSettings(): SettingsState {
     const loaded = { ...defaultSettings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
     return {
       ...loaded,
+      indexAnalysisMode: normalizeIndexAnalysisMode(loaded.indexAnalysisMode),
       backgroundIndexIntervalMinutes: normalizeBackgroundIndexIntervalMinutes(
         loaded.backgroundIndexIntervalMinutes,
       ),
@@ -1604,8 +1821,56 @@ function normalizeBackgroundIndexIntervalMinutes(value: unknown): number {
   return DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES;
 }
 
+function normalizeIndexAnalysisMode(value: unknown): IndexAnalysisMode {
+  if (value === "full") {
+    return "full";
+  }
+  return "quality";
+}
+
 function formatMinutes(minutes: number): string {
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+function hasAdjacentTrack(results: SearchResult[], current: SearchResult, direction: -1 | 1): boolean {
+  const index = results.findIndex((result) => result.track_id === current.track_id);
+  return index >= 0 && index + direction >= 0 && index + direction < results.length;
+}
+
+function audioMimeType(path: string): string {
+  const extension = path.split(".").pop()?.toLowerCase();
+  if (extension === "mp3") return "audio/mpeg";
+  if (extension === "m4a" || extension === "aac") return "audio/mp4";
+  if (extension === "wav") return "audio/wav";
+  if (extension === "flac") return "audio/flac";
+  if (extension === "ogg") return "audio/ogg";
+  if (extension === "opus") return "audio/opus";
+  if (extension === "aif" || extension === "aiff") return "audio/aiff";
+  return "audio/mpeg";
+}
+
+function describeAudioError(audio: HTMLAudioElement | null): string {
+  const code = audio?.error?.code;
+  const suffix = audio?.currentSrc ? ` (${audio.currentSrc})` : "";
+  if (code === 1) return `Playback aborted${suffix}`;
+  if (code === 2) return `Could not load track via local asset protocol${suffix}`;
+  if (code === 3) return `Could not decode this audio file in MusicIdx${suffix}`;
+  if (code === 4) {
+    return `This audio source or codec is not supported by the embedded player${suffix}`;
+  }
+  return `Could not play this file in MusicIdx${suffix}`;
+}
+
+function packagedSemanticModelDefault(current: string, packaged: string | undefined): string {
+  const packagedModel = (packaged || "").trim();
+  if (!packagedModel) {
+    return current;
+  }
+  const currentModel = current.trim();
+  if (!currentModel || currentModel === DEFAULT_SEMANTIC_MODEL) {
+    return packagedModel;
+  }
+  return current;
 }
 
 function parseJsonish<T>(text: string): T {

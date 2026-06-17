@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from musicidx.cli import _run_tag_subprocess_batches
+from musicidx.cli import _run_tag_subprocess_batches, _tag_subprocess_base_command
 from musicidx.db import connect_db, init_db
 
 
@@ -54,6 +54,20 @@ def test_run_tag_subprocess_batches_splits_track_ids(monkeypatch, tmp_path):
     assert summary.updated == 3
     assert summary.errors == 0
     assert summary.model_count == 2
+
+
+def test_tag_subprocess_base_command_uses_executable_when_frozen(monkeypatch):
+    monkeypatch.setattr("musicidx.cli.sys.executable", "/tmp/musicidx")
+    monkeypatch.setattr("musicidx.cli.sys.frozen", True, raising=False)
+
+    assert _tag_subprocess_base_command() == ["/tmp/musicidx"]
+
+
+def test_tag_subprocess_base_command_uses_python_module_when_not_frozen(monkeypatch):
+    monkeypatch.setattr("musicidx.cli.sys.executable", "/tmp/python")
+    monkeypatch.delattr("musicidx.cli.sys.frozen", raising=False)
+
+    assert _tag_subprocess_base_command() == ["/tmp/python", "-m", "musicidx.cli"]
 
 
 def test_run_tag_subprocess_batches_records_failed_batch(monkeypatch, tmp_path):

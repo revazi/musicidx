@@ -29,6 +29,7 @@ class EmbeddingSummary:
     errors: int = 0
     model: str = DEFAULT_EMBEDDING_MODEL
     kind: str = EMBEDDING_KIND
+    last_error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,8 +112,9 @@ def process_embeddings(
             vectors = embed_texts(texts, model_name=model_name)
             if len(vectors) != len(batch):
                 raise EmbeddingError("embedding model returned unexpected vector count")
-        except EmbeddingError:
+        except EmbeddingError as exc:
             summary.errors += len(batch)
+            summary.last_error = str(exc)
             continue
 
         for row, vector in zip(batch, vectors, strict=True):

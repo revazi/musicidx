@@ -34,7 +34,7 @@ Expected use:
 musicidx scan <folder> --json
 musicidx metadata --missing-only --json
 musicidx fingerprint --missing-only --json
-musicidx analyze-basic --quick --chunked --chunk-sec auto --workers auto --resource-profile auto --json
+musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto --json
 musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto --json
 musicidx embed --batch-size auto --resource-profile auto --json
 ```
@@ -120,6 +120,8 @@ musicidx search "chill bar" --format json --concise --limit 10 --explain
 
 Important top-level fields:
 
+Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, and `sort_by`.
+
 | Field | Meaning |
 | --- | --- |
 | `db_path` | SQLite DB used for the search. |
@@ -127,7 +129,7 @@ Important top-level fields:
 | `parser` | Parser mode, for example `dynamic` or `dynamic+gemini`. |
 | `llm_error` | LLM failure message when `--llm` fallback occurred. |
 | `intent` | Compact parsed intent. |
-| `diagnostics` | Candidate counts, ranking weights, semantic errors. |
+| `diagnostics` | Candidate counts, ranking weights, semantic errors, and score normalization. |
 | `results` | Ranked result list. |
 
 Important result fields:
@@ -137,8 +139,9 @@ Important result fields:
 | `track_id` | Stable local track ID. |
 | `path` | Local file path. |
 | `title` / `artist` / `album` / `genre` | Display metadata when available. |
-| `score` | Final local ranking score. |
+| `score` | User-facing relevance score normalized to the top returned result (`1.0` is best for that query). |
 | `why` | Human-readable explanations when `--explain` is used. |
+| `raw_score` | Raw weighted ranking score used internally for ordering/debugging. |
 | `scores` | Compact score components. |
 | `matched_tags` | Top matched ML/local tags. |
 

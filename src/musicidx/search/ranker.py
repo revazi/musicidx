@@ -17,6 +17,11 @@ from musicidx.search.intent import (
     parse_intent_dynamic,
 )
 
+MIN_RANKING_TAG_SCORE = 0.20
+MIN_RESULT_SCORE = 0.05
+SEMANTIC_FLOOR = 0.15
+SEMANTIC_CEILING = 0.75
+
 
 @dataclass(slots=True)
 class SearchResult:
@@ -83,7 +88,11 @@ def search_music(
     )
     feedback_scores = _feedback_scores(conn, query, include_missing=include_missing)
 
-    weights = _weights(use_semantic=bool(semantic_scores), use_feedback=bool(feedback_scores))
+    weights = _weights(
+        intent,
+        use_semantic=bool(semantic_scores),
+        use_feedback=bool(feedback_scores),
+    )
     scored_results: list[SearchResult] = []
     for row in track_rows:
         track_id = row["track_id"]
@@ -112,21 +121,73 @@ def search_music(
         )
 
     ranked = sorted(scored_results, key=lambda result: result.score, reverse=True)
-    diversified = _apply_diversity(ranked, intent)
+    filtered = _filter_weak_results(ranked, intent)
+    sorted_results = _apply_explicit_sort(filtered, intent)
+    diversified = sorted_results if intent.sort_by else _apply_diversity(sorted_results, intent)
+    limited_results = diversified[: intent.limit]
+    display_results = _with_display_scores(limited_results)
     diagnostics = {
         "candidate_count": len(track_rows),
+        "scored_candidate_count": len(scored_results),
+        "filtered_candidate_count": len(filtered),
+        "minimum_result_score": MIN_RESULT_SCORE,
+        "minimum_ranking_tag_score": MIN_RANKING_TAG_SCORE,
+        "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
         "fts_candidate_count": len(fts_scores),
         "semantic_candidate_count": len(semantic_scores),
         "feedback_candidate_count": len(feedback_scores),
         "semantic_error": semantic_error,
         "weights": weights,
+        "score_normalization": "relative_to_top_result",
+        "top_raw_score": _top_raw_score(limited_results),
     }
     return SearchResponse(
         query=query,
         intent=intent,
-        results=diversified[: intent.limit],
+        results=display_results,
         diagnostics=diagnostics,
     )
+
+
+def _with_display_scores(results: list[SearchResult]) -> list[SearchResult]:
+    if not results:
+        return []
+    top_score = _top_raw_score(results)
+    if top_score <= 0:
+        return results
+
+    output: list[SearchResult] = []
+    for result in results:
+        raw_score = _raw_score(result)
+        display_score = max(0.0, min(1.0, raw_score / top_score))
+        breakdown = dict(result.breakdown)
+        breakdown["raw_score"] = raw_score
+        breakdown["display_score"] = display_score
+        breakdown["score_normalization"] = "relative_to_top_result"
+        output.append(
+            SearchResult(
+                track_id=result.track_id,
+                path=result.path,
+                title=result.title,
+                artist=result.artist,
+                album=result.album,
+                genre=result.genre,
+                score=round(display_score, 6),
+                breakdown=breakdown,
+                explanation=result.explanation,
+            )
+        )
+    return output
+
+
+def _top_raw_score(results: list[SearchResult]) -> float:
+    if not results:
+        return 0.0
+    return max(_raw_score(result) for result in results)
+
+
+def _raw_score(result: SearchResult) -> float:
+    return float(result.breakdown.get("final_score", result.score) or 0.0)
 
 
 def _select_track_candidates(
@@ -238,10 +299,7 @@ def _semantic_scores(
         return {}, str(exc)
     except Exception as exc:  # pragma: no cover - dependency/runtime errors vary
         return {}, f"semantic search unavailable: {exc}"
-    return {
-        result.track_id: max(0.0, min(1.0, (result.score + 1.0) / 2.0))
-        for result in results
-    }, None
+    return {result.track_id: _semantic_relevance(result.score) for result in results}, None
 
 
 def _score_track(
@@ -276,7 +334,24 @@ def _score_track(
         "matched_tags": matched_tags,
         "avoided_tags": avoided_tags,
         "feature_reasons": feature_reasons,
+        "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
+        "sort_values": _sort_values(row),
     }
+
+
+def _sort_values(row: sqlite3.Row) -> dict[str, float | None]:
+    return {
+        "tempo_bpm": _safe_row_float(row, "bpm"),
+        "energy": _safe_row_float(row, "energy"),
+        "danceability": _safe_row_float(row, "danceability"),
+        "aggression": _safe_row_float(row, "aggression"),
+        "brightness": _safe_row_float(row, "brightness"),
+    }
+
+
+def _safe_row_float(row: sqlite3.Row, key: str) -> float | None:
+    value = row[key]
+    return None if value is None else float(value)
 
 
 def _tag_score(
@@ -286,19 +361,21 @@ def _tag_score(
     prefer = intent.prefer_tags + intent.prefer_tag_concepts
     avoid = intent.avoid_tags + intent.avoid_tag_concepts
     if not prefer and not avoid:
-        return 0.5, [], []
+        return 0.0, [], []
 
     positive = 0.0
     negative = 0.0
     matched_tags: list[dict[str, Any]] = []
     avoided_tags: list[dict[str, Any]] = []
     for tag in track_tags:
+        score = float(tag["score"])
+        if score < MIN_RANKING_TAG_SCORE:
+            continue
+        contribution = (score - MIN_RANKING_TAG_SCORE) / (1.0 - MIN_RANKING_TAG_SCORE)
         if _tag_matches(tag["tag"], prefer):
-            contribution = 0.15 + 0.85 * float(tag["score"])
             positive += contribution
             matched_tags.append(tag)
         if _tag_matches(tag["tag"], avoid):
-            contribution = 0.15 + 0.85 * float(tag["score"])
             negative += contribution
             avoided_tags.append(tag)
 
@@ -320,7 +397,7 @@ def _tag_matches(tag: str, concepts: list[str]) -> bool:
 
 def _feature_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[str]]:
     if not intent.feature_ranges:
-        return 0.5, []
+        return 0.0, []
 
     scores: list[float] = []
     reasons: list[str] = []
@@ -341,7 +418,7 @@ def _feature_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[
 def range_score(value: Any, low: float, high: float, *, softness: float = 0.15) -> float:
     """Score a value against a soft target range."""
     if value is None:
-        return 0.4
+        return 0.0
     numeric = float(value)
     if low <= numeric <= high:
         return 1.0
@@ -352,8 +429,8 @@ def range_score(value: Any, low: float, high: float, *, softness: float = 0.15) 
 def _profile_term_score(profile_text: str, query_terms: list[str]) -> float:
     if not profile_text or not query_terms:
         return 0.0
-    normalized = profile_text.lower()
-    matched = sum(1 for term in query_terms if re.search(rf"\b{re.escape(term)}\b", normalized))
+    text_terms = set(re.findall(r"[a-z0-9]+", profile_text.lower()))
+    matched = sum(1 for term in query_terms if term in text_terms)
     return matched / len(query_terms)
 
 
@@ -390,11 +467,103 @@ def _feedback_scores(
     }
 
 
-def _weights(*, use_semantic: bool, use_feedback: bool) -> dict[str, float]:
+def _semantic_relevance(cosine_score: float) -> float:
+    if cosine_score <= SEMANTIC_FLOOR:
+        return 0.0
+    if cosine_score >= SEMANTIC_CEILING:
+        return 1.0
+    return (cosine_score - SEMANTIC_FLOOR) / (SEMANTIC_CEILING - SEMANTIC_FLOOR)
+
+
+def _filter_weak_results(results: list[SearchResult], intent: SearchIntent) -> list[SearchResult]:
+    if intent.sort_by:
+        return [result for result in results if _has_sort_value(result, intent)]
+    meaningful = [result for result in results if result.score >= MIN_RESULT_SCORE]
+    if meaningful and _has_subjective_intent(intent):
+        evidence_results = [result for result in meaningful if _has_query_evidence(result)]
+        if evidence_results:
+            minimum_count = min(intent.limit, 5)
+            if len(evidence_results) >= minimum_count or not _allow_feature_backfill(intent):
+                return evidence_results
+            evidence_ids = {result.track_id for result in evidence_results}
+            feature_backfill = [
+                result
+                for result in meaningful
+                if result.track_id not in evidence_ids and not _has_avoid_match(result)
+            ]
+            return [*evidence_results, *feature_backfill[: minimum_count - len(evidence_results)]]
+    if meaningful:
+        return meaningful
+    return [result for result in results if result.score > 0.0]
+
+
+def _has_subjective_intent(intent: SearchIntent) -> bool:
+    return bool(
+        intent.contexts
+        or intent.prefer_tag_concepts
+        or intent.prefer_tags
+        or intent.avoid_tag_concepts
+        or intent.avoid_tags
+    )
+
+
+def _allow_feature_backfill(intent: SearchIntent) -> bool:
+    return bool({"party", "workout", "shower"}.intersection(intent.contexts))
+
+
+def _has_query_evidence(result: SearchResult) -> bool:
+    breakdown = result.breakdown
+    return bool(
+        float(breakdown.get("tag_score") or 0.0) > 0.0
+        or float(breakdown.get("text_score") or 0.0) > 0.0
+        or float(breakdown.get("semantic_score") or 0.0) > 0.0
+        or float(breakdown.get("feedback_score") or 0.0) > 0.0
+    )
+
+
+def _has_avoid_match(result: SearchResult) -> bool:
+    return bool(result.breakdown.get("avoided_tags"))
+
+
+def _has_sort_value(result: SearchResult, intent: SearchIntent) -> bool:
+    sort_values = result.breakdown.get("sort_values") or {}
+    return any(sort_values.get(sort_spec.field) is not None for sort_spec in intent.sort_by)
+
+
+def _apply_explicit_sort(results: list[SearchResult], intent: SearchIntent) -> list[SearchResult]:
+    if not intent.sort_by:
+        return results
+
+    def key(result: SearchResult) -> tuple[Any, ...]:
+        sort_values = result.breakdown.get("sort_values") or {}
+        parts: list[Any] = []
+        for sort_spec in intent.sort_by:
+            value = sort_values.get(sort_spec.field)
+            parts.append(value is None)
+            numeric = float(value) if value is not None else 0.0
+            parts.append(-numeric if sort_spec.direction == "desc" else numeric)
+        parts.append(-result.score)
+        return tuple(parts)
+
+    return sorted(results, key=key)
+
+
+def _weights(
+    intent: SearchIntent,
+    *,
+    use_semantic: bool,
+    use_feedback: bool,
+) -> dict[str, float]:
+    has_mood_or_feature_intent = bool(intent.contexts or intent.feature_ranges)
     if use_semantic:
-        weights = {"semantic": 0.30, "tags": 0.30, "features": 0.25, "text": 0.15}
+        if has_mood_or_feature_intent:
+            weights = {"semantic": 0.48, "tags": 0.24, "features": 0.20, "text": 0.08}
+        else:
+            weights = {"semantic": 0.52, "tags": 0.22, "features": 0.16, "text": 0.10}
+    elif has_mood_or_feature_intent:
+        weights = {"semantic": 0.0, "tags": 0.40, "features": 0.34, "text": 0.26}
     else:
-        weights = {"semantic": 0.0, "tags": 0.40, "features": 0.35, "text": 0.25}
+        weights = {"semantic": 0.0, "tags": 0.34, "features": 0.18, "text": 0.48}
     if use_feedback:
         weights["features"] = max(0.0, weights["features"] - 0.03)
         weights["text"] = max(0.0, weights["text"] - 0.02)

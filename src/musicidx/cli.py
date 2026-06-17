@@ -401,6 +401,12 @@ def _record_tag_batch_error(conn: sqlite3.Connection, track_ids: list[str], erro
     conn.commit()
 
 
+def _tag_subprocess_base_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, "-m", "musicidx.cli"]
+
+
 def _run_tag_subprocess_batches(
     *,
     db_path: Path,
@@ -425,9 +431,7 @@ def _run_tag_subprocess_batches(
             ids_path = temp_path / f"batch-{batch_index}.json"
             ids_path.write_text(json.dumps(batch))
             command = [
-                sys.executable,
-                "-m",
-                "musicidx.cli",
+                *_tag_subprocess_base_command(),
                 "analyze-tags",
                 "--db",
                 str(db_path),
@@ -1979,6 +1983,7 @@ def _search_payload(response: Any, *, db_path: str, concise: bool) -> dict[str, 
                 name: feature_range.as_dict()
                 for name, feature_range in intent.feature_ranges.items()
             },
+            "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
             "semantic_model": intent.semantic_model,
             "use_semantic": intent.use_semantic,
         },
@@ -1997,6 +2002,7 @@ def _concise_result(result: Any) -> dict[str, Any]:
         "album": result.album,
         "genre": result.genre,
         "score": result.score,
+        "raw_score": round(float(breakdown.get("raw_score", result.score)), 6),
         "why": result.explanation,
         "scores": {
             "semantic": round(float(breakdown.get("semantic_score", 0.0)), 6),

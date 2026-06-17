@@ -4,9 +4,24 @@
 MusicIdx MVP
 
 ## Goal
-Build a local-first CLI tool that scans a directory of music tracks, analyzes metadata and audio features, stores them in a local index database, and lets the user search the library with natural-language queries such as “chill bar music,” “shower music,” or “melancholic songs.”
+Build MusicIdx as a local-first CLI plus Tauri desktop app that scans a directory of music tracks, analyzes metadata/audio features/ML tags/embeddings, stores everything in SQLite, and lets the user search the library with natural-language queries such as “chill bar music,” “shower music,” or “melancholic songs.”
 
-The CLI should be built first. A cross-platform desktop app may be added later as a thin UI over the same local engine and database.
+The CLI remains the source-of-truth engine. The desktop app is a thin UI over the same local CLI/database.
+
+## Current implementation status — 2026-06-17
+
+Implemented and expected:
+
+- Typer CLI with SQLite/FTS5, scanner, metadata, fingerprints, basic features, Essentia tags, profile text, semantic embeddings, hybrid search, export, eval, feedback, missing-track handling, and diagnostics.
+- Tauri desktop UI for indexing/search/settings/playback, including app-open background auto-indexing with cancellation.
+- Background indexing is app-open polling, not a daemon. It scans for added/modified/missing/root-missing changes and runs derived indexing only when needed.
+- Missing files are marked with `missing_at`; pruning is explicit via `prune-missing`.
+- Modified files invalidate stale derived metadata/fingerprints/features/tags/profiles/embeddings.
+- Basic audio analysis should use full-track chunked analysis by default. Do **not** use quick/first-120s analysis automatically; `--quick` is only an explicit CLI escape hatch.
+- Semantic search uses sentence-transformers profile-text embeddings. Hybrid search should report `semantic_candidate_count > 0` and `semantic_error: null` when semantics are active.
+- Optional LLM intent parsing supports Gemini/OpenAI. It must always try to produce usable structured music intent for vague/slang/conversational queries unless the user explicitly asks not to search.
+- Natural-language sorting is first-class via `sort_by`, e.g. highest BPM, slowest, most energetic, least aggressive.
+- User-facing result `score` is normalized relative relevance (`1.0` for the top returned result). Raw weighted ranking score is exposed as `raw_score`/breakdown for diagnostics.
 
 ## Product summary
 Build an MVP command-line app where a user can:
@@ -40,17 +55,17 @@ musicidx export "shower music" --limit 25 --out shower.m3u
 - Metadata extraction: ffprobe JSON output first
 - Audio analysis: librosa first
 - Optional music tagging later: Essentia models
-- Optional local LLM intent parsing later: Ollama or llama.cpp
-- Optional embeddings later: sentence-transformers, then SQLite vector search only if needed
-- Future desktop app: cross-platform wrapper, likely Tauri/Electron/PySide6, over the CLI/helper engine
+- Optional LLM intent parsing: Gemini/OpenAI today; local providers such as Ollama can be added later
+- Semantic embeddings: sentence-transformers over deterministic track-profile text; brute-force NumPy cosine search for now
+- Desktop app: Tauri wrapper over the CLI/helper engine
 
 ## Core engineering principles
 - Keep the MVP simple
 - Prefer boring, maintainable solutions
 - Make the smallest useful change possible
-- Build the CLI before any desktop UI
+- Keep the CLI usable independently from the desktop UI
 - Prefer synchronous request/response flows first
-- Avoid background systems until they are explicitly requested
+- Keep background behavior bounded and explicit; current background indexing is app-open polling only
 - Keep dependencies minimal
 - Keep indexing and search behavior transparent and debuggable
 - Prefer deterministic parsing and scoring before adding LLM behavior
@@ -76,14 +91,14 @@ musicidx export "shower music" --limit 25 --out shower.m3u
 - No remote audio upload
 - No user account system
 - No web app unless explicitly requested
-- No desktop app code until explicitly requested
+- Do not add a new desktop framework; the current desktop app is Tauri
 - No Celery
 - No Redis
 - No Docker unless explicitly requested
 - No Kubernetes
 - No microservices
 - No event-driven architecture
-- No background worker system unless explicitly requested
+- No permanent daemon/background worker system unless explicitly requested
 - No external hosted database
 - No mandatory external LLM API
 - No telemetry unless explicitly requested
@@ -130,7 +145,7 @@ Do not implement commands from later phases unless explicitly asked.
 - Keep database access understandable
 - Keep scoring logic separate from CLI command handlers
 - Keep analysis logic separate from database persistence
-- Use Pydantic models where validation meaningfully improves clarity
+- Use dataclasses and explicit allow-list validation unless a stronger schema library is clearly needed
 - Add tests for behavior that can regress easily
 
 Suggested project structure:
@@ -175,7 +190,7 @@ Only create directories and files needed for the current task.
 
 ## Database conventions
 - Use SQLite as the local source of truth
-- Store the default database under the user’s application support/config area
+- Default CLI development DB is project/current-working-directory `musicidx.sqlite`; packaged desktop builds should use app-data paths
 - Keep migrations simple and idempotent
 - Enable foreign keys
 - Prefer WAL mode for the local index database
@@ -242,7 +257,8 @@ channels
 - Start with basic deterministic audio features
 - Use `librosa` first
 - Analyze in mono with a consistent sample rate
-- Add a quick mode before optimizing for full-library accuracy
+- Use full-track chunked analysis by default; do not use quick/first-120s sampling automatically
+- Keep `--quick` only as an explicit CLI escape hatch for manual experiments
 - Store raw features and normalized derived values where useful
 - Make analysis resumable by skipping already-analyzed tracks with the current analysis version
 - Corrupt files should be recorded as analysis failures and skipped
@@ -266,8 +282,8 @@ danceability proxy
 
 ## AI / search implementation guidance
 - Keep first versions heuristic and easy to inspect
-- Prefer deterministic intent parsing before adding LLM-backed parsing
-- Add LLM-backed features only when needed for a concrete user flow
+- Prefer deterministic intent parsing as the fallback path
+- LLM-backed parsing is optional and should improve intent extraction only
 - The LLM should parse user intent, not invent track recommendations
 - The ranking system must only return tracks that exist in the local database
 - Keep scoring logic transparent and debuggable
@@ -300,8 +316,8 @@ Candidate sources may include:
 - generated track profile text
 - audio feature ranges
 - tag matches
-- optional semantic embeddings later
-- optional user feedback later
+- semantic profile embeddings when available
+- optional/query-aware user feedback
 
 Initial scoring can combine:
 
@@ -317,22 +333,20 @@ Keep ranking weights configurable or easy to adjust. Do not hardcode subjective 
 
 ## Playlist/export guidance
 - M3U export is the first priority
-- JSON output is useful for the future desktop app
+- JSON output is used by the desktop app
 - CSV export can be added when requested
 - Do not build full playlist management until requested
 
 ## Desktop app guidance
-- Do not implement the desktop app during the CLI MVP unless explicitly requested
-- Design CLI JSON output so a future app can call it
-- Keep the engine independent from terminal formatting
-- The future cross-platform app should be a thin layer over the same database and engine
-- Prefer a wrapper such as Tauri, Electron, or PySide6/Qt when the UI phase begins
-- Do not introduce desktop UI framework code into the Python CLI project prematurely
+- The desktop app is implemented in `desktop/` with Tauri and should remain a thin layer over the CLI/database.
+- Design CLI JSON output so the desktop can call it reliably.
+- Keep the engine independent from terminal formatting.
+- Do not introduce another desktop UI framework without explicit direction.
 
 ## Privacy and local-first rules
 - Do not upload audio files anywhere
 - Do not send track metadata to remote APIs unless explicitly requested
-- Do not require hosted LLM APIs
+- Do not require hosted LLM APIs; Gemini/OpenAI are optional intent parsers only
 - Do not add telemetry or analytics unless explicitly requested
 - Any optional model download behavior must be explicit
 - Keep user library paths local and private

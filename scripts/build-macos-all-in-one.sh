@@ -139,8 +139,13 @@ if [[ ! -d "$MODELS_SOURCE" ]]; then
   exit 1
 fi
 
+FFMPEG_SOURCE="${MUSICIDX_FFMPEG_SOURCE:-$(command -v ffmpeg || true)}"
 FFPROBE_SOURCE="${MUSICIDX_FFPROBE_SOURCE:-$(command -v ffprobe || true)}"
 FPCALC_SOURCE="${MUSICIDX_FPCALC_SOURCE:-$(command -v fpcalc || true)}"
+if [[ -z "$FFMPEG_SOURCE" || ! -x "$FFMPEG_SOURCE" ]]; then
+  echo "ffmpeg not found. Install/provide it or set MUSICIDX_FFMPEG_SOURCE=/path/to/ffmpeg." >&2
+  exit 1
+fi
 if [[ -z "$FFPROBE_SOURCE" || ! -x "$FFPROBE_SOURCE" ]]; then
   echo "ffprobe not found. Install/provide it or set MUSICIDX_FFPROBE_SOURCE=/path/to/ffprobe." >&2
   exit 1
@@ -194,11 +199,13 @@ rsync -a --delete --exclude '.DS_Store' "$MODELS_SOURCE/" "$RESOURCES_DIR/models
 touch "$RESOURCES_DIR/models/.gitkeep"
 
 printf '\n==> Copying audio helper binaries into app resources\n'
+cp "$FFMPEG_SOURCE" "$RESOURCES_DIR/bin/ffmpeg"
 cp "$FFPROBE_SOURCE" "$RESOURCES_DIR/bin/ffprobe"
 cp "$FPCALC_SOURCE" "$RESOURCES_DIR/bin/fpcalc"
-chmod +x "$RESOURCES_DIR/bin/ffprobe" "$RESOURCES_DIR/bin/fpcalc"
+chmod +x "$RESOURCES_DIR/bin/ffmpeg" "$RESOURCES_DIR/bin/ffprobe" "$RESOURCES_DIR/bin/fpcalc"
 
-printf '\n==> Bundling ffprobe/fpcalc dylib dependencies\n'
+printf '\n==> Bundling ffmpeg/ffprobe/fpcalc dylib dependencies\n'
+rewrite_and_copy_dylibs "$RESOURCES_DIR/bin/ffmpeg" "bin"
 rewrite_and_copy_dylibs "$RESOURCES_DIR/bin/ffprobe" "bin"
 rewrite_and_copy_dylibs "$RESOURCES_DIR/bin/fpcalc" "bin"
 touch "$RESOURCES_DIR/lib/.gitkeep"

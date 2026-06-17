@@ -218,7 +218,7 @@ uv run musicidx init
 uv run musicidx scan /path/to/music
 uv run musicidx metadata --missing-only
 uv run musicidx fingerprint --missing-only
-uv run musicidx analyze-basic --quick --chunked --chunk-sec auto --workers auto --resource-profile auto
+uv run musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto
 uv run musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto
 uv run musicidx embed --model .musicidx-models/all-MiniLM-L6-v2 --batch-size auto --resource-profile auto
 ```
@@ -227,7 +227,7 @@ Notes:
 
 - `--resource-profile auto` scales workers, chunk size, and batch size from detected RAM/CPU.
 - Available profiles: `auto`, `low`, `balanced`, `full`.
-- `analyze-basic --chunked` analyzes audio in sequential chunks to reduce peak RAM for long tracks.
+- `analyze-basic --chunked` analyzes the whole track in sequential chunks to reduce peak RAM for long tracks.
 - `analyze-tags` is the most memory-sensitive step; subprocess batches are enabled by default so TensorFlow/Essentia memory is reclaimed between small batches.
 - Avoid `embed --refresh` unless you intentionally want to recompute embeddings.
 - See [`.agents/optimisation.md`](.agents/optimisation.md) for the optimisation plan.
@@ -253,7 +253,7 @@ musicidx init
 musicidx scan /path/to/music --json
 musicidx metadata --missing-only --json
 musicidx fingerprint --missing-only --json
-musicidx analyze-basic --quick --chunked --chunk-sec auto --workers auto --resource-profile auto --json
+musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto --json
 musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto --json
 musicidx embed --batch-size auto --resource-profile auto --json
 ```

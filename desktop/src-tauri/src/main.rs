@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State, Theme};
 
 #[derive(Serialize)]
@@ -17,6 +17,8 @@ struct DesktopState {
     current_dir: String,
     cli_path: String,
     prefix_args: String,
+    models_path: String,
+    semantic_model: String,
 }
 
 #[derive(Serialize)]
@@ -25,6 +27,13 @@ struct MusicidxOutput {
     success: bool,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Serialize)]
+struct PlaybackSource {
+    path: String,
+    transcoded: bool,
+    detail: String,
 }
 
 type RunningChildren = Arc<Mutex<HashMap<String, Child>>>;
@@ -53,6 +62,14 @@ fn desktop_state(app: AppHandle) -> DesktopState {
         .filter(|value| !value.is_empty());
     let use_packaged_cli = env_cli.is_none() && packaged_cli.is_some();
 
+    let packaged_models = packaged_models_path(&app);
+    let packaged_semantic_model = packaged_models
+        .as_ref()
+        .map(|path| path.join("all-MiniLM-L6-v2"))
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+
     DesktopState {
         current_dir: default_working_dir(&app),
         cli_path: env_cli
@@ -63,6 +80,10 @@ fn desktop_state(app: AppHandle) -> DesktopState {
         } else {
             musicidx_prefix_args().join(" ")
         },
+        models_path: packaged_models
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        semantic_model: packaged_semantic_model,
     }
 }
 
@@ -235,6 +256,125 @@ fn cancel_musicidx(processes: State<'_, ProcessState>, request_id: String) -> Re
     };
     kill_process_tree(child).map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+#[tauri::command]
+fn open_track(path: String) -> Result<(), String> {
+    let path = existing_path(path)?;
+    open_path_with_system(&path)
+}
+
+#[tauri::command]
+fn reveal_track(path: String) -> Result<(), String> {
+    let path = existing_path(path)?;
+    reveal_path_with_system(&path)
+}
+
+#[tauri::command]
+fn prepare_playback_fallback(app: AppHandle, path: String) -> Result<PlaybackSource, String> {
+    let input = existing_path(path)?;
+    let ffmpeg = packaged_bin_path(&app, "ffmpeg")
+        .map(|path| path.display().to_string())
+        .or_else(|| env::var("MUSICIDX_FFMPEG_PATH").ok())
+        .unwrap_or_else(|| String::from("ffmpeg"));
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("could not resolve app cache dir: {error}"))?
+        .join("playback-cache");
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("could not create playback cache: {error}"))?;
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let output = cache_dir.join(format!("musicidx-playback-{timestamp_ms}.m4a"));
+
+    let transcode = Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&input)
+        .args(["-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        .arg(&output)
+        .output()
+        .map_err(|error| format!("failed to run ffmpeg playback fallback `{ffmpeg}`: {error}"))?;
+    if !transcode.status.success() {
+        let stderr = String::from_utf8_lossy(&transcode.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&transcode.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("ffmpeg playback fallback failed: {detail}"));
+    }
+
+    Ok(PlaybackSource {
+        path: output.display().to_string(),
+        transcoded: true,
+        detail: format!("transcoded with {ffmpeg}"),
+    })
+}
+
+fn existing_path(path: String) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("track path is empty"));
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.exists() {
+        return Err(format!("track path does not exist: {}", path.display()));
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn open_path_with_system(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("open");
+    command.arg(path);
+    run_external_command(&mut command, "open track")
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_path_with_system(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("open");
+    command.args(["-R"]).arg(path);
+    run_external_command(&mut command, "reveal track")
+}
+
+#[cfg(target_os = "windows")]
+fn open_path_with_system(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("cmd");
+    command.args(["/C", "start", ""]).arg(path);
+    run_external_command(&mut command, "open track")
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_path_with_system(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("explorer");
+    command.arg(format!("/select,{}", path.display()));
+    run_external_command(&mut command, "reveal track")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_path_with_system(path: &Path) -> Result<(), String> {
+    let mut command = Command::new("xdg-open");
+    command.arg(path);
+    run_external_command(&mut command, "open track")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn reveal_path_with_system(path: &Path) -> Result<(), String> {
+    let target = path.parent().unwrap_or(path);
+    let mut command = Command::new("xdg-open");
+    command.arg(target);
+    run_external_command(&mut command, "reveal track")
+}
+
+fn run_external_command(command: &mut Command, action: &str) -> Result<(), String> {
+    let status = command
+        .status()
+        .map_err(|error| format!("failed to {action}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("failed to {action}: exited with {status}"))
+    }
 }
 
 #[cfg(windows)]
@@ -517,6 +657,7 @@ fn executable_name(name: &'static str) -> &'static str {
             "musicidx" => "musicidx.exe",
             "ffprobe" => "ffprobe.exe",
             "fpcalc" => "fpcalc.exe",
+            "ffmpeg" => "ffmpeg.exe",
             other => other,
         }
     }
@@ -594,7 +735,10 @@ fn main() {
             set_window_theme,
             run_musicidx,
             run_musicidx_stream,
-            cancel_musicidx
+            cancel_musicidx,
+            open_track,
+            reveal_track,
+            prepare_playback_fallback
         ])
         .run(tauri::generate_context!())
         .expect("error while running MusicIdx desktop app");

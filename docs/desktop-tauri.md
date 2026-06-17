@@ -87,6 +87,7 @@ The Tauri UI can:
 - keep indexing setup and individual scan/metadata/fingerprint/basic/tag/embed actions in Settings
 - show manual and background pipeline progress by step, runtime, counts, and memory diagnostics in a floating progress panel with a Cancel button
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
+- choose a manual indexing type: Full-track chunked or Full-track larger chunks
 - choose separate manual and background indexing resource profiles: auto, low, balanced, or full
 - default background auto-indexing to Balanced so it is faster than conservative Auto/Low but less aggressive than Full
 - run quick basic audio analysis in adaptive chunks to lower peak RAM
@@ -97,7 +98,7 @@ The Tauri UI can:
 - stream command stdout/stderr into an expandable live/raw output panel
 - parse natural-language intent
 - run concise JSON search with explanations
-- render search result cards
+- render search result cards with in-app audio playback via Tauri asset protocol and a Show action for revealing tracks in the file manager
 - save good/bad/neutral feedback from result cards
 - run the starter eval set from advanced indexing actions
 - export M3U playlists from a floating bottom-right icon button
@@ -115,6 +116,7 @@ MUSICIDX_MODELS_PATH
 MUSICIDX_FFPROBE_PATH
 MUSICIDX_FPCALC_PATH
 semantic/embedding model
+manual indexing type
 manual indexing resource profile
 background auto-indexing toggle
 background check interval

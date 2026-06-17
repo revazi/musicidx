@@ -63,17 +63,17 @@ CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
     "chill": {
         "keywords": ["chill", "relax", "relaxed", "calm", "laid back", "laid-back"],
         "prefer": ["relaxing", "calm", "ambient", "downtempo", "background", "soft"],
-        "avoid": ["aggressive", "hardcore", "metal", "chaotic", "heavy"],
-        "features": {"energy": "low_mid", "aggression": "low", "brightness": "low_mid"},
+        "avoid": ["aggressive", "hardcore", "metal", "chaotic", "heavy", "party", "workout"],
+        "features": {"energy": "low", "aggression": "low", "brightness": "low_mid"},
     },
     "bar": {
         "keywords": ["bar", "lounge", "cocktail", "cafe", "restaurant"],
-        "prefer": ["background", "relaxing", "downtempo", "ambient", "jazz", "soul", "house"],
-        "avoid": ["aggressive", "hardcore", "metal", "chaotic", "very loud"],
+        "prefer": ["background", "relaxing", "downtempo", "ambient", "jazz", "soul", "lounge"],
+        "avoid": ["aggressive", "hardcore", "metal", "chaotic", "very loud", "party"],
         "features": {
-            "energy": "low_mid",
+            "energy": "low",
             "aggression": "low",
-            "danceability": "mid",
+            "brightness": "low_mid",
             "tempo_bpm": "low_mid",
         },
     },
@@ -84,10 +84,27 @@ CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
         "features": {"energy": "high", "danceability": "mid_high", "tempo_bpm": "mid_high"},
     },
     "melancholic": {
-        "keywords": ["sad", "melancholic", "melancholy", "blue", "heartbreak"],
-        "prefer": ["sad", "melancholic", "emotional", "dark", "romantic", "meditative"],
+        "keywords": [
+            "sad",
+            "melancholic",
+            "melancholy",
+            "blue",
+            "heartbreak",
+            "reflective",
+            "introspective",
+        ],
+        "prefer": [
+            "sad",
+            "melancholic",
+            "emotional",
+            "dark",
+            "romantic",
+            "meditative",
+            "reflective",
+            "introspective",
+        ],
         "avoid": ["party", "very energetic", "aggressive"],
-        "features": {"energy": "low_mid", "brightness": "low", "aggression": "low"},
+        "features": {"energy": "low", "brightness": "low", "aggression": "low"},
     },
     "party": {
         "keywords": ["party", "club", "dancefloor", "celebration"],
@@ -105,10 +122,10 @@ CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
         "keywords": ["focus", "study", "work", "coding", "concentrate", "reading"],
         "prefer": ["background", "ambient", "meditative", "calm", "minimal", "deep"],
         "avoid": ["aggressive", "party", "very energetic"],
-        "features": {"energy": "low_mid", "aggression": "low", "brightness": "low_mid"},
+        "features": {"energy": "low", "aggression": "low", "brightness": "low_mid"},
     },
     "sleep": {
-        "keywords": ["sleep", "bed", "night", "nap", "dream"],
+        "keywords": ["sleep", "sleepy", "bed", "night", "nap", "dream"],
         "prefer": ["relaxing", "calm", "meditative", "ambient", "soft", "slow", "soundscape"],
         "avoid": ["party", "energetic", "aggressive", "fast"],
         "features": {
@@ -131,8 +148,8 @@ CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
         "features": {"energy": "low_mid", "aggression": "low"},
     },
     "happy": {
-        "keywords": ["happy", "feel good", "uplifting", "positive"],
-        "prefer": ["happy", "positive", "uplifting", "fun", "upbeat"],
+        "keywords": ["happy", "feel good", "feel-good", "uplifting", "positive", "upbeat"],
+        "prefer": ["happy", "positive", "uplifting", "fun", "upbeat", "energetic"],
         "avoid": ["sad", "dark", "melancholic"],
         "features": {"energy": "mid_high", "danceability": "mid_high"},
     },
@@ -142,6 +159,118 @@ CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
         "avoid": ["happy", "party"],
         "features": {"brightness": "low", "aggression": "low_mid"},
     },
+}
+
+QUERY_PRIORS: dict[str, dict[str, Any]] = {
+    "energetic": {
+        "keywords": ["energetic", "high energy", "high-energy", "pumped", "pumping"],
+        "prefer": ["energetic", "energy", "upbeat", "powerful", "intense"],
+        "avoid": ["sleep", "sleepy", "quiet", "calm"],
+        "features": {"energy": "high"},
+    },
+    "low_energy": {
+        "keywords": ["low energy", "low-energy", "quiet", "mellow", "soft", "gentle"],
+        "prefer": ["calm", "mellow", "soft", "gentle", "relaxing"],
+        "avoid": ["aggressive", "hardcore", "chaotic", "very energetic"],
+        "features": {"energy": "low_mid", "aggression": "low"},
+    },
+    "danceable": {
+        "keywords": ["dance", "danceable", "dancy", "danciest", "groove", "groovy"],
+        "prefer": ["dance", "danceable", "danceability", "groove", "groovy", "disco", "house"],
+        "avoid": ["drone", "ambient sleep"],
+        "features": {"danceability": "high", "energy": "mid_high"},
+    },
+    "fast": {
+        "keywords": ["fast", "faster", "uptempo", "up-tempo", "high bpm", "high-bpm"],
+        "prefer": ["fast", "uptempo", "energetic"],
+        "avoid": ["slow", "sleepy"],
+        "features": {"tempo_bpm": "high", "energy": "mid_high"},
+    },
+    "slow": {
+        "keywords": ["slow", "slower", "downtempo", "down-tempo", "low bpm", "low-bpm"],
+        "prefer": ["slow", "downtempo", "calm", "relaxing"],
+        "avoid": ["fast", "hardcore"],
+        "features": {"tempo_bpm": "low", "energy": "low_mid"},
+    },
+    "aggressive": {
+        "keywords": ["aggressive", "hard", "heavy", "intense", "brutal", "chaotic"],
+        "prefer": ["aggressive", "hard", "heavy", "intense", "powerful"],
+        "avoid": ["sleep", "soft", "calm"],
+        "features": {"aggression": "high", "energy": "mid_high"},
+    },
+    "not_aggressive": {
+        "keywords": [
+            "not aggressive",
+            "less aggressive",
+            "low aggression",
+            "non aggressive",
+            "non-aggressive",
+        ],
+        "prefer": ["soft", "calm", "gentle", "relaxing"],
+        "avoid": ["aggressive", "hardcore", "heavy", "chaotic"],
+        "features": {"aggression": "low", "energy": "low_mid"},
+    },
+    "bright": {
+        "keywords": ["bright", "brighter", "sparkly", "shimmering", "shiny"],
+        "prefer": ["bright", "sparkly", "uplifting", "shimmering"],
+        "avoid": ["dark", "muddy"],
+        "features": {"brightness": "high"},
+    },
+    "dark": {
+        "keywords": ["dark", "darker", "moody", "noir", "shadowy"],
+        "prefer": ["dark", "moody", "deep", "noir"],
+        "avoid": ["bright", "happy"],
+        "features": {"brightness": "low"},
+    },
+    "instrumental": {
+        "keywords": ["instrumental", "no vocals", "without vocals", "vocal-free", "vocal free"],
+        "prefer": ["instrumental", "background", "ambient", "minimal"],
+        "avoid": ["vocal", "vocals", "singer", "singalong"],
+        "features": {},
+    },
+    "vocal": {
+        "keywords": ["vocal", "vocals", "singing", "singer", "singalong"],
+        "prefer": ["vocal", "vocals", "singing", "singer", "song"],
+        "avoid": ["instrumental"],
+        "features": {},
+    },
+    "lofi": {
+        "keywords": ["lofi", "lo-fi", "lo fi"],
+        "prefer": ["lofi", "lo-fi", "hip hop", "beats", "chill", "background"],
+        "avoid": ["aggressive", "party"],
+        "features": {"energy": "low_mid", "aggression": "low"},
+    },
+}
+
+QUERY_CONCEPT_STOP_WORDS = {
+    "best",
+    "by",
+    "fastest",
+    "find",
+    "good",
+    "great",
+    "highest",
+    "library",
+    "list",
+    "local",
+    "lowest",
+    "most",
+    "least",
+    "nice",
+    "no",
+    "not",
+    "order",
+    "please",
+    "recommend",
+    "recommendations",
+    "show",
+    "slowest",
+    "some",
+    "sort",
+    "stuff",
+    "top",
+    "vibe",
+    "vibes",
 }
 
 
@@ -161,6 +290,16 @@ class TagStat:
 class FeatureRange:
     low: float
     high: float
+    source: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class SortSpec:
+    field: str
+    direction: str
     source: str
 
     def as_dict(self) -> dict[str, Any]:
@@ -196,6 +335,7 @@ class IntentHints:
     prefer_tag_concepts: list[str] = field(default_factory=list)
     avoid_tag_concepts: list[str] = field(default_factory=list)
     feature_preferences: dict[str, str] = field(default_factory=dict)
+    sort_by: list[SortSpec] = field(default_factory=list)
     limit: int | None = None
     notes: str | None = None
 
@@ -217,6 +357,7 @@ class SearchIntent:
     prefer_tags: list[str]
     avoid_tags: list[str]
     feature_ranges: dict[str, FeatureRange]
+    sort_by: list[SortSpec]
     semantic_model: str | None
     use_semantic: bool
     diversity: dict[str, int]
@@ -239,6 +380,7 @@ class SearchIntent:
                 field_name: feature_range.as_dict()
                 for field_name, feature_range in self.feature_ranges.items()
             },
+            "sort_by": [sort_spec.as_dict() for sort_spec in self.sort_by],
             "semantic_model": self.semantic_model,
             "use_semantic": self.use_semantic,
             "diversity": self.diversity,
@@ -314,13 +456,20 @@ def parse_intent_dynamic(
 ) -> SearchIntent:
     """Parse a query using common listening priors plus the actual library vocabulary."""
     library_profile = build_library_profile(conn, include_missing=include_missing)
-    query_terms = normalize_terms(query)
+    negated_terms = _negated_query_terms(query)
+    query_terms = [term for term in normalize_terms(query) if term not in negated_terms]
     detected_contexts = _unique(_detect_contexts(query) + (llm_hints.contexts if llm_hints else []))
     parsed_limit = limit or (llm_hints.limit if llm_hints else None) or _parse_limit(query) or 10
 
     prefer_concepts: list[str] = []
     avoid_concepts: list[str] = []
     requested_feature_preferences: dict[str, list[str]] = {}
+    sort_by = _parse_sort_specs(query)
+    prior_prefer, prior_avoid, prior_features = _detect_query_priors(query)
+    prefer_concepts.extend(prior_prefer)
+    avoid_concepts.extend(prior_avoid)
+    for field_name, levels in prior_features.items():
+        requested_feature_preferences.setdefault(field_name, []).extend(levels)
 
     for context in detected_contexts:
         if context not in CONTEXT_PRIORS:
@@ -337,9 +486,21 @@ def parse_intent_dynamic(
         for field_name, level in llm_hints.feature_preferences.items():
             if field_name in DEFAULT_FEATURE_RANGES and level in DEFAULT_FEATURE_RANGES[field_name]:
                 requested_feature_preferences.setdefault(field_name, []).append(level)
+        sort_by = _merge_sort_specs(sort_by, llm_hints.sort_by)
 
-    # Unknown or specific query words still influence tag matching dynamically.
-    prefer_concepts.extend(query_terms)
+    for sort_spec in sort_by:
+        if sort_spec.field in DEFAULT_FEATURE_RANGES:
+            requested_feature_preferences.setdefault(sort_spec.field, []).append(
+                "very_high" if sort_spec.direction == "desc" else "very_low"
+            )
+
+    # Unknown or specific query words still influence tag matching dynamically, but
+    # remove command/sort filler so words like "highest" or "show" do not pollute ranking.
+    prefer_concepts.extend(
+        term
+        for term in query_terms
+        if term not in QUERY_CONCEPT_STOP_WORDS and term not in avoid_concepts
+    )
 
     prefer_concepts = _unique(prefer_concepts)
     avoid_concepts = _unique(avoid_concepts)
@@ -355,8 +516,9 @@ def parse_intent_dynamic(
                 feature_range,
             )
 
-    available_semantic_model = (
-        semantic_model if semantic_model in library_profile.embedding_models else None
+    available_semantic_model = _select_available_semantic_model(
+        semantic_model,
+        library_profile.embedding_models,
     )
 
     return SearchIntent(
@@ -372,11 +534,100 @@ def parse_intent_dynamic(
         prefer_tags=prefer_tags,
         avoid_tags=avoid_tags,
         feature_ranges=feature_ranges,
+        sort_by=sort_by,
         semantic_model=available_semantic_model,
         use_semantic=available_semantic_model is not None,
         diversity={"max_tracks_per_artist": 2},
         library_profile=library_profile,
     )
+
+
+def _select_available_semantic_model(
+    requested_model: str,
+    available_models: list[str],
+) -> str | None:
+    if requested_model in available_models:
+        return requested_model
+    requested_leaf = requested_model.rstrip("/").split("/")[-1]
+    for model in available_models:
+        if model.rstrip("/").split("/")[-1] == requested_leaf:
+            return model
+    if requested_model == DEFAULT_EMBEDDING_MODEL and available_models:
+        return available_models[0]
+    return None
+
+
+def _parse_sort_specs(query: str) -> list[SortSpec]:
+    normalized = " ".join(query.lower().split())
+    specs: list[SortSpec] = []
+
+    def add(field: str, direction: str, source: str) -> None:
+        specs.append(SortSpec(field=field, direction=direction, source=source))
+
+    high_tempo_pattern = r"\b(highest|max(?:imum)?|fastest|quickest|highest\s+bpm|most\s+bpm)\b"
+    if re.search(high_tempo_pattern, normalized):
+        if re.search(r"\b(bpm|tempo|fastest|quickest)\b", normalized):
+            add("tempo_bpm", "desc", "natural_language")
+    if re.search(r"\b(lowest|min(?:imum)?|slowest|least\s+bpm)\b", normalized):
+        if re.search(r"\b(bpm|tempo|slowest)\b", normalized):
+            add("tempo_bpm", "asc", "natural_language")
+
+    feature_patterns = {
+        "energy": {
+            "desc": [r"\bmost energetic\b", r"\bhighest energy\b", r"\bmax(?:imum)? energy\b"],
+            "asc": [r"\bleast energetic\b", r"\blowest energy\b", r"\bminimum energy\b"],
+        },
+        "danceability": {
+            "desc": [r"\bmost danceable\b", r"\bdanciest\b", r"\bhighest danceability\b"],
+            "asc": [r"\bleast danceable\b", r"\blowest danceability\b"],
+        },
+        "aggression": {
+            "desc": [r"\bmost aggressive\b", r"\bhardest\b", r"\bhighest aggression\b"],
+            "asc": [r"\bleast aggressive\b", r"\bsoftest\b", r"\blowest aggression\b"],
+        },
+        "brightness": {
+            "desc": [r"\bbrightest\b", r"\bhighest brightness\b", r"\bmost bright\b"],
+            "asc": [r"\bdarkest\b", r"\blowest brightness\b", r"\bleast bright\b"],
+        },
+    }
+    for field_name, directions in feature_patterns.items():
+        for direction, patterns in directions.items():
+            if any(re.search(pattern, normalized) for pattern in patterns):
+                add(field_name, direction, "natural_language")
+
+    explicit = re.search(
+        r"\b(?:sort|order)\s+by\s+(bpm|tempo|energy|danceability|dance|aggression|brightness)\s*(asc|ascending|desc|descending)?\b",
+        normalized,
+    )
+    if explicit:
+        field = _normalize_sort_field(explicit.group(1))
+        direction = "asc" if explicit.group(2) in {"asc", "ascending"} else "desc"
+        add(field, direction, "natural_language")
+
+    return _merge_sort_specs([], specs)
+
+
+def _normalize_sort_field(field_name: str) -> str:
+    normalized = field_name.strip().lower()
+    if normalized in {"bpm", "tempo"}:
+        return "tempo_bpm"
+    if normalized == "dance":
+        return "danceability"
+    return normalized
+
+
+def _merge_sort_specs(*groups: list[SortSpec]) -> list[SortSpec]:
+    output: list[SortSpec] = []
+    seen: set[str] = set()
+    for group in groups:
+        for spec in group:
+            field_name = _normalize_sort_field(spec.field)
+            direction = spec.direction if spec.direction in {"asc", "desc"} else "desc"
+            if field_name not in DEFAULT_FEATURE_RANGES or field_name in seen:
+                continue
+            seen.add(field_name)
+            output.append(SortSpec(field=field_name, direction=direction, source=spec.source))
+    return output[:3]
 
 
 def normalize_terms(text: str) -> list[str]:
@@ -385,19 +636,28 @@ def normalize_terms(text: str) -> list[str]:
         "a",
         "an",
         "and",
+        "are",
+        "bar",
+        "bpm",
         "for",
         "give",
         "i",
+        "is",
         "me",
         "music",
+        "my",
         "of",
         "play",
         "songs",
+        "that",
         "the",
         "to",
         "track",
         "tracks",
         "want",
+        "with",
+        "without",
+        *QUERY_CONCEPT_STOP_WORDS,
     }
     return [
         term
@@ -438,19 +698,19 @@ def dynamic_feature_range(
         return FeatureRange(low=low, high=high, source=f"fallback:{level}")
 
     if level == "very_low":
-        low, high = percentiles["min"], percentiles["p35"]
+        low, high = percentiles["min"], percentiles["p25"]
     elif level == "low":
-        low, high = percentiles["min"], percentiles["p45"]
+        low, high = percentiles["min"], percentiles["p35"]
     elif level == "low_mid":
-        low, high = percentiles["min"], percentiles["p65"]
+        low, high = percentiles["min"], percentiles["p55"]
     elif level == "mid":
         low, high = percentiles["p25"], percentiles["p75"]
     elif level == "mid_high":
-        low, high = percentiles["p35"], percentiles["max"]
+        low, high = percentiles["p45"], percentiles["max"]
     elif level == "high":
-        low, high = percentiles["p55"], percentiles["max"]
+        low, high = percentiles["p65"], percentiles["max"]
     elif level == "very_high":
-        low, high = percentiles["p70"], percentiles["max"]
+        low, high = percentiles["p75"], percentiles["max"]
     else:
         low, high = DEFAULT_FEATURE_RANGES[field_name]["mid"]
         return FeatureRange(low=low, high=high, source="fallback:mid")
@@ -502,15 +762,70 @@ def _feature_percentiles(
     return output
 
 
+def _detect_query_priors(query: str) -> tuple[list[str], list[str], dict[str, list[str]]]:
+    prefer: list[str] = []
+    avoid: list[str] = []
+    features: dict[str, list[str]] = {}
+    matched_names = [
+        name
+        for name, prior in QUERY_PRIORS.items()
+        if any(_keyword_present(query, keyword) for keyword in prior.get("keywords", []))
+    ]
+    if "not_aggressive" in matched_names:
+        matched_names = [name for name in matched_names if name != "aggressive"]
+    if "instrumental" in matched_names:
+        matched_names = [name for name in matched_names if name != "vocal"]
+
+    for name in matched_names:
+        prior = QUERY_PRIORS[name]
+        prefer.extend(prior.get("prefer", []))
+        avoid.extend(prior.get("avoid", []))
+        for field_name, level in prior.get("features", {}).items():
+            if field_name in DEFAULT_FEATURE_RANGES and level in DEFAULT_FEATURE_RANGES[field_name]:
+                features.setdefault(field_name, []).append(level)
+    return _unique(prefer), _unique(avoid), features
+
+
 def _detect_contexts(query: str) -> list[str]:
-    normalized = query.lower()
     contexts: list[str] = []
     for context, prior in CONTEXT_PRIORS.items():
         for keyword in prior["keywords"]:
-            if re.search(rf"\b{re.escape(keyword)}\b", normalized):
+            if _keyword_present(query, keyword):
                 contexts.append(context)
                 break
     return contexts
+
+
+def _keyword_present(query: str, keyword: str) -> bool:
+    normalized_query = query.lower().replace("-", " ")
+    normalized_keyword = keyword.lower().replace("-", " ")
+    escaped = re.escape(normalized_keyword).replace(r"\ ", r"\s+")
+    return re.search(rf"\b{escaped}\b", normalized_query) is not None
+
+
+def _negated_query_terms(query: str) -> set[str]:
+    negated: set[str] = set()
+    if any(
+        _keyword_present(query, phrase)
+        for phrase in [
+            "not aggressive",
+            "less aggressive",
+            "low aggression",
+            "non aggressive",
+            "non-aggressive",
+        ]
+    ):
+        negated.update({"aggressive", "aggression"})
+    if any(
+        _keyword_present(query, phrase)
+        for phrase in ["no vocals", "without vocals", "vocal free", "vocal-free", "no singing"]
+    ):
+        negated.update({"vocal", "vocals", "singing", "singer"})
+    if any(_keyword_present(query, phrase) for phrase in ["not fast", "not too fast"]):
+        negated.update({"fast", "faster", "uptempo"})
+    if any(_keyword_present(query, phrase) for phrase in ["not slow", "not too slow"]):
+        negated.update({"slow", "slower", "downtempo"})
+    return negated
 
 
 def _parse_limit(query: str) -> int | None:

@@ -17,10 +17,27 @@ local music library
   -> SQLite index
   -> natural-language intent parser
   -> hybrid search/ranking
-  -> CLI now, cross-platform desktop app later
+  -> CLI + Tauri desktop UI
 ```
 
-The local LLM should not be responsible for listening to or analyzing raw audio. It should translate natural-language user requests into structured search intent. The search/ranking system should then retrieve real tracks from the local database.
+The LLM should not be responsible for listening to or analyzing raw audio. It should translate natural-language user requests into structured search intent. The search/ranking system should then retrieve real tracks from the local database.
+
+---
+
+## Current implementation status — 2026-06-17
+
+This document began as a phased plan; the current implementation is ahead of several early-phase assumptions.
+
+Implemented now:
+
+- Python/Typer CLI with SQLite/FTS5, scanner, metadata, fingerprints, full-track chunked audio features, Essentia tags, profile text, semantic embeddings, hybrid search, export, eval, feedback, missing-track handling, and diagnostics.
+- Tauri desktop app over the CLI/database with settings, indexing, search, feedback, in-app playback, missing-track actions, and app-open background auto-indexing.
+- Background auto-indexing is app-open polling, not a daemon. It marks missing/root-missing state and runs derived indexing for added/modified files.
+- Basic audio analysis defaults to full-track chunked mode. Do **not** use quick/first-120s analysis automatically; `--quick` is only an explicit CLI option.
+- Semantic search uses sentence-transformers profile-text embeddings and participates in hybrid ranking when `semantic_candidate_count > 0` and `semantic_error` is null.
+- Optional LLM intent parsing uses Gemini/OpenAI. The prompt must always try to produce usable music intent for vague/slang/conversational input unless the user explicitly asks not to search.
+- Natural-language sort intent is structured through `sort_by` and supports feature sorting such as highest BPM, slowest, most energetic, least aggressive, most danceable, brightest, and darkest.
+- User-facing result `score` is normalized relative relevance for the returned result set; raw weighted ranking score is exposed separately as `raw_score`/breakdown.
 
 ---
 
@@ -89,11 +106,12 @@ The local LLM should not be responsible for listening to or analyzing raw audio.
            │
            ▼
 ┌───────────────────────────────────────────────────────┐
-│ CLI now, cross-platform desktop app later              │
+│ CLI + Tauri desktop app                                │
 │ - search results                                       │
 │ - explanations                                         │
 │ - M3U/JSON export                                      │
 │ - feedback loop                                        │
+│ - in-app playback                                      │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -109,10 +127,10 @@ Full-text search: SQLite FTS5
 Vector search:    Start with NumPy brute force; later sqlite-vec
 Metadata:         ffprobe JSON first; TagLib/lofty later if needed
 Audio analysis:   librosa first; Essentia optional later
-Local LLM:        Ollama first; llama.cpp later
+LLM intent:       optional Gemini/OpenAI today; local providers later if needed
 Embeddings:       sentence-transformers for track-profile text
-Packaging:        uv/Poetry for development; PyInstaller/Briefcase later
-Desktop app:      Tauri/Electron/PySide6 wrapper calling CLI/helper engine
+Packaging:        uv for development; PyInstaller/Tauri sidecar packaging scaffolding
+Desktop app:      Tauri wrapper calling CLI/helper engine
 ```
 
 ---
@@ -686,17 +704,17 @@ analyze_basic_features(path: Path) -> AudioFeatures
 
 ```text
 mono
-22050 Hz or 44100 Hz
-quick mode: first N seconds
-accurate mode: full file
+22050 Hz
+full-track chunked mode by default
+quick/first-120s mode only when explicitly passed on the CLI
 ```
 
 3. Add command:
 
 ```bash
 musicidx analyze-basic
-musicidx analyze-basic --workers 4
-musicidx analyze-basic --quick
+musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto
+musicidx analyze-basic --chunked --chunk-sec 300 --resource-profile full
 musicidx analyze-basic --track-id <id>
 musicidx analyze-basic --json
 ```
@@ -873,7 +891,9 @@ Examples:
 
 ## LLM Version
 
-Use a local LLM to produce structured JSON. Validate everything with Pydantic. If the LLM is unavailable or invalid, fall back to the rule-based parser.
+Use optional Gemini/OpenAI intent parsing to produce structured JSON hints. Validate and sanitize every field in code. If the LLM is unavailable or invalid, fall back to the dynamic local parser.
+
+The LLM prompt must always try to produce usable music search intent, even for vague, slang, typo-filled, or conversational queries. Empty hints are only appropriate when the user explicitly asks not to search.
 
 ## SearchIntent JSON Schema
 
@@ -886,58 +906,37 @@ Use a local LLM to produce structured JSON. Validate everything with Pydantic. I
       "minimum": 1,
       "maximum": 100
     },
-    "context": {
-      "type": "string"
-    },
-    "energy": {
-      "type": "array",
-      "items": { "type": "number" },
-      "minItems": 2,
-      "maxItems": 2
-    },
-    "valence": {
-      "type": "array",
-      "items": { "type": "number" },
-      "minItems": 2,
-      "maxItems": 2
-    },
-    "tempo_bpm": {
-      "type": "array",
-      "items": { "type": "number" },
-      "minItems": 2,
-      "maxItems": 2
-    },
-    "danceability": {
-      "type": "array",
-      "items": { "type": "number" },
-      "minItems": 2,
-      "maxItems": 2
-    },
-    "prefer_tags": {
+    "contexts": {
       "type": "array",
       "items": { "type": "string" }
     },
-    "avoid_tags": {
+    "prefer_tag_concepts": {
       "type": "array",
       "items": { "type": "string" }
     },
-    "include_genres": {
+    "avoid_tag_concepts": {
       "type": "array",
       "items": { "type": "string" }
     },
-    "exclude_genres": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "diversity": {
+    "feature_preferences": {
       "type": "object",
-      "properties": {
-        "max_tracks_per_artist": { "type": "integer" },
-        "max_tracks_per_album": { "type": "integer" }
+      "description": "field -> very_low|low|low_mid|mid|mid_high|high|very_high"
+    },
+    "sort_by": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "field": { "type": "string" },
+          "direction": { "type": "string", "enum": ["asc", "desc"] }
+        }
       }
+    },
+    "notes": {
+      "type": "string"
     }
   },
-  "required": ["limit", "prefer_tags", "avoid_tags"]
+  "required": []
 }
 ```
 
@@ -950,12 +949,12 @@ Return only JSON matching the provided schema.
 
 Do not invent track names.
 Do not recommend music.
-Only translate the user's request into search constraints.
+Only translate the user's request into search hints.
+Always produce a usable music search intent, even for vague/slang/conversational text.
+Use sort_by for explicit ordering requests such as highest BPM or least aggressive.
 
-All continuous values must be between 0 and 1 unless the field is tempo_bpm.
-
-User query:
-"{query}"
+User request object contains the query, aggregate library profile, allowed contexts,
+allowed feature fields/levels, and allowed sort fields/directions.
 ```
 
 ## Steps for Pi Coding Agent
@@ -971,8 +970,8 @@ parse_intent(query: str) -> SearchIntent
 2. Add fallback order:
 
 ```text
-LLM available and valid JSON -> use LLM
-LLM unavailable/invalid -> rule-based parser
+LLM available and valid JSON -> merge sanitized LLM hints into dynamic parser
+LLM unavailable/invalid -> dynamic local parser only
 ```
 
 3. Add command:
@@ -983,7 +982,7 @@ musicidx parse "shower music" --llm
 musicidx parse "shower music" --no-llm
 ```
 
-4. Validate all LLM output with Pydantic.
+4. Validate and sanitize all LLM output with strict allow-lists.
 
 5. Clamp unsafe or out-of-range values.
 
@@ -1009,15 +1008,11 @@ Produce useful ranked results.
 
 ```text
 1. Parse natural-language query into SearchIntent.
-2. Build candidate pool:
-   - semantic embedding top 200
-   - FTS top 200
-   - feature/range SQL candidates
-   - tag match candidates
-3. Merge candidates.
-4. Score each candidate.
-5. Apply diversity.
-6. Return top N.
+2. Load local candidate rows, tags, FTS scores, semantic scores when available, and feedback scores.
+3. Score each candidate with semantic/tag/feature/text/feedback components.
+4. Filter weak fallback candidates; subjective queries prefer tag/text/semantic evidence when available.
+5. Apply explicit sort intent if requested, otherwise apply artist diversity.
+6. Return top N with normalized user-facing relevance scores.
 7. Explain why each track matched.
 ```
 
@@ -1026,14 +1021,19 @@ Produce useful ranked results.
 Start with configurable weights:
 
 ```text
-final_score =
-    0.30 * semantic_score
-  + 0.25 * feature_fit_score
-  + 0.20 * mood_tag_score
-  + 0.10 * metadata_text_score
-  + 0.10 * genre_context_score
-  + 0.05 * feedback_score
-  - diversity_penalty
+raw_score =
+    semantic_weight * semantic_score
+  + tag_weight      * tag_score
+  + feature_weight  * feature_score
+  + text_weight     * text_score
+  + feedback_weight * feedback_score
+
+User-facing result.score is normalized relative relevance:
+
+display_score = raw_score / top_raw_score
+
+The top returned result therefore displays as 1.0 while raw_score remains available
+for diagnostics.
 ```
 
 ## Feature Scoring
@@ -1724,8 +1724,9 @@ Requirements:
   energy, brightness, aggression proxy, danceability proxy.
 - Store results in audio_features.
 - Update track profile text after analysis.
-- Add --quick mode that analyzes only the first 120 seconds.
-- Add --workers option.
+- Add full-track chunked analysis with --chunked, --chunk-sec, and --max-chunks.
+- Keep --quick only as an explicit CLI escape hatch; do not use it by default.
+- Add --workers and --resource-profile options.
 - Corrupt files must be recorded as analysis errors and skipped, not crash.
 ```
 
@@ -1745,33 +1746,35 @@ Requirements:
   track_tags
   audio_features
   optional embeddings if present
-- Rank using weighted hybrid score.
+- Rank using weighted hybrid raw score, then expose normalized relative relevance as user-facing score.
+- Support structured sort_by for natural-language sorting such as highest BPM.
 - Add --limit, --json, --explain, --format table/json/m3u.
 - Enforce diversity:
   default max 2 tracks per artist.
 - Search must only return non-missing files by default.
 ```
 
-## Task 5 — Add Local LLM Structured Intent Parsing
+## Task 5 — Add Optional LLM Structured Intent Parsing
 
 ```text
-Add local LLM structured intent parsing.
+Add optional LLM structured intent parsing.
 
 Requirements:
 - Add search/llm.py.
-- Support Ollama endpoint from config.
-- Prompt model to return only JSON matching SearchIntent schema.
-- Validate with Pydantic.
-- If LLM is unavailable or invalid, fall back to rule-based parser.
-- Add musicidx parse --llm and musicidx parse --no-llm.
-- Add tests using mocked Ollama responses.
+- Support Gemini/OpenAI providers from config; local providers can be added later.
+- Prompt model to return only JSON matching the intent-hints schema.
+- Always ask the LLM to produce usable music intent for vague/slang/conversational queries unless the user explicitly asks not to search.
+- Validate/sanitize with strict allow-lists.
+- If LLM is unavailable or invalid, fall back to the dynamic local parser.
+- Add musicidx parse/search --llm and --no-llm.
+- Add tests using mocked Gemini/OpenAI responses.
 ```
 
 ---
 
 # Final Recommendation
 
-Build the CLI first and make the database/search engine reliable before starting the cross-platform desktop UI. The MVP does not need deep audio-text models. It needs:
+Keep the CLI/database/search engine reliable and keep the Tauri desktop app as a thin wrapper over it. The MVP does not need deep raw-audio text models. It needs:
 
 ```text
 reliable scanning

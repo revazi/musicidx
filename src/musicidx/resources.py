@@ -205,7 +205,7 @@ def recommend_indexing_plan(
         embedding_batch_size=embedding_batch_size,
         tag_batch_size=tag_batch_size,
         basic_chunk_sec=basic_chunk_sec,
-        quick_basic=True,
+        quick_basic=False,
         missing_only=True,
         reason=reason,
         warning=warning,

@@ -22,6 +22,7 @@ from musicidx.search.intent import (
     DEFAULT_FEATURE_RANGES,
     IntentHints,
     LibraryProfile,
+    SortSpec,
 )
 
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
@@ -196,6 +197,7 @@ def intent_hints_from_json(data: dict[str, Any]) -> IntentHints:
     prefer = _string_list(data.get("prefer_tag_concepts"))
     avoid = _string_list(data.get("avoid_tag_concepts"))
     feature_preferences = _feature_preferences(data.get("feature_preferences"))
+    sort_by = _sort_specs(data.get("sort_by"))
     limit = _safe_limit(data.get("limit"))
     notes = data.get("notes") if isinstance(data.get("notes"), str) else None
 
@@ -204,6 +206,7 @@ def intent_hints_from_json(data: dict[str, Any]) -> IntentHints:
         prefer_tag_concepts=prefer,
         avoid_tag_concepts=avoid,
         feature_preferences=feature_preferences,
+        sort_by=sort_by,
         limit=limit,
         notes=notes,
     )
@@ -215,6 +218,8 @@ def _intent_request(query: str, library_profile: LibraryProfile) -> dict[str, An
         "library_profile": library_profile.as_dict(),
         "allowed_contexts": sorted(CONTEXT_PRIORS.keys()),
         "allowed_feature_fields": sorted(DEFAULT_FEATURE_RANGES.keys()),
+        "allowed_sort_fields": sorted(DEFAULT_FEATURE_RANGES.keys()),
+        "allowed_sort_directions": ["asc", "desc"],
         "allowed_feature_levels": sorted(
             {level for ranges in DEFAULT_FEATURE_RANGES.values() for level in ranges}
         ),
@@ -241,11 +246,25 @@ Use this schema:
     "brightness": "very_low|low|low_mid|mid|mid_high|high|very_high",
     "tempo_bpm": "very_low|low|low_mid|mid|mid_high|high|very_high"
   },
+  "sort_by": [
+    {"field": "energy|danceability|aggression|brightness|tempo_bpm", "direction": "asc|desc"}
+  ],
   "notes": string
 }
 
+Use sort_by for natural-language ordering requests such as highest BPM, fastest, slowest,
+most energetic, least aggressive, most danceable, brightest, or darkest. Do not put sorting
+instructions only in notes when they fit sort_by.
+
+Always produce a usable music search intent, even for vague, slang, typo-filled,
+or conversational queries.
+
+If the query is only a greeting, casual slang, or has no explicit music meaning,
+infer a broad default listening intent depending on the tone, feeling and mood expressed.
+
+Do not return empty hints unless the user explicitly asks not to search.
+
 Prefer tag concepts that exist or are semantically close to the provided library tags.
-If unsure, produce broad mood/genre concepts rather than track recommendations.
 """.strip()
 
 
@@ -362,6 +381,35 @@ def _feature_preferences(value: Any) -> dict[str, str]:
             continue
         output[normalized_field] = normalized_level
     return output
+
+
+def _sort_specs(value: Any) -> list[SortSpec]:
+    if not isinstance(value, list):
+        return []
+    output: list[SortSpec] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        field = item.get("field")
+        direction = item.get("direction")
+        if not isinstance(field, str) or not isinstance(direction, str):
+            continue
+        normalized_field = field.strip().lower()
+        if normalized_field in {"bpm", "tempo"}:
+            normalized_field = "tempo_bpm"
+        if normalized_field == "dance":
+            normalized_field = "danceability"
+        normalized_direction = direction.strip().lower()
+        if normalized_field not in DEFAULT_FEATURE_RANGES or normalized_field in seen:
+            continue
+        if normalized_direction not in {"asc", "desc"}:
+            continue
+        seen.add(normalized_field)
+        output.append(
+            SortSpec(field=normalized_field, direction=normalized_direction, source="llm")
+        )
+    return output[:3]
 
 
 def _safe_limit(value: Any) -> int | None:
