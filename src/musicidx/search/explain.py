@@ -13,6 +13,13 @@ def build_explanation(breakdown: dict[str, Any]) -> list[str]:
     if semantic_score is not None and semantic_score > 0:
         lines.append(f"semantic profile similarity {semantic_score:.2f}")
 
+    metadata_matches = breakdown.get("metadata_matches") or []
+    if metadata_matches:
+        summary = ", ".join(
+            f"{item['field']}={item['value']}" for item in metadata_matches[:3]
+        )
+        lines.append(f"metadata match: {summary}")
+
     matched_tags = breakdown.get("matched_tags") or []
     if matched_tags:
         tag_text = ", ".join(

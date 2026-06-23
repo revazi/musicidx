@@ -2006,6 +2006,7 @@ def _concise_result(result: Any) -> dict[str, Any]:
         "why": result.explanation,
         "scores": {
             "semantic": round(float(breakdown.get("semantic_score", 0.0)), 6),
+            "metadata": round(float(breakdown.get("metadata_score", 0.0)), 6),
             "tags": round(float(breakdown.get("tag_score", 0.0)), 6),
             "features": round(float(breakdown.get("feature_score", 0.0)), 6),
             "text": round(float(breakdown.get("text_score", 0.0)), 6),

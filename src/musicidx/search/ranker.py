@@ -120,7 +120,15 @@ def search_music(
             )
         )
 
-    ranked = sorted(scored_results, key=lambda result: result.score, reverse=True)
+    artist_focused = any(_has_strong_artist_match(result) for result in scored_results)
+    ranked = sorted(
+        scored_results,
+        key=lambda result: (
+            _has_strong_artist_match(result) if artist_focused else False,
+            result.score,
+        ),
+        reverse=True,
+    )
     filtered = _filter_weak_results(ranked, intent)
     sorted_results = _apply_explicit_sort(filtered, intent)
     diversified = sorted_results if intent.sort_by else _apply_diversity(sorted_results, intent)
@@ -204,6 +212,7 @@ def _select_track_candidates(
             t.title,
             t.artist,
             t.album,
+            t.album_artist,
             t.genre,
             t.missing_at,
             p.profile_text,
@@ -314,10 +323,12 @@ def _score_track(
 ) -> dict[str, Any]:
     tag_score, matched_tags, avoided_tags = _tag_score(track_tags, intent)
     feature_score, feature_reasons = _feature_score(row, intent)
+    metadata_score, metadata_matches = _metadata_score(row, intent)
     text_score = max(fts_score, _profile_term_score(row["profile_text"] or "", intent.query_terms))
 
     final_score = (
         weights["semantic"] * semantic_score
+        + weights["metadata"] * metadata_score
         + weights["tags"] * tag_score
         + weights["features"] * feature_score
         + weights["text"] * text_score
@@ -328,11 +339,13 @@ def _score_track(
         "final_score": final_score,
         "semantic_score": semantic_score,
         "tag_score": tag_score,
+        "metadata_score": metadata_score,
         "feature_score": feature_score,
         "text_score": text_score,
         "feedback_score": feedback_score,
         "matched_tags": matched_tags,
         "avoided_tags": avoided_tags,
+        "metadata_matches": metadata_matches,
         "feature_reasons": feature_reasons,
         "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
         "sort_values": _sort_values(row),
@@ -352,6 +365,66 @@ def _sort_values(row: sqlite3.Row) -> dict[str, float | None]:
 def _safe_row_float(row: sqlite3.Row, key: str) -> float | None:
     value = row[key]
     return None if value is None else float(value)
+
+
+def _metadata_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[dict[str, Any]]]:
+    query_terms = set(normalize_tag_terms(intent.query))
+    if not query_terms:
+        return 0.0, []
+    query_text = " ".join(query_terms)
+    fields = [
+        ("artist", row["artist"], 1.0),
+        ("album_artist", row["album_artist"], 0.95),
+        ("title", row["title"], 0.75),
+        ("album", row["album"], 0.55),
+        ("genre", row["genre"], 0.45),
+    ]
+    matches: list[dict[str, Any]] = []
+    for field_name, value, field_weight in fields:
+        score = _metadata_field_score(
+            str(value) if value else None,
+            query_terms=query_terms,
+            query_text=query_text,
+            field_name=field_name,
+        )
+        if score <= 0.0:
+            continue
+        matches.append(
+            {
+                "field": field_name,
+                "value": value,
+                "score": round(min(1.0, score * field_weight), 6),
+            }
+        )
+    matches.sort(key=lambda item: float(item["score"]), reverse=True)
+    return (float(matches[0]["score"]) if matches else 0.0), matches[:5]
+
+
+def _metadata_field_score(
+    value: str | None,
+    *,
+    query_terms: set[str],
+    query_text: str,
+    field_name: str,
+) -> float:
+    if not value:
+        return 0.0
+    field_terms = set(normalize_tag_terms(value))
+    if not field_terms:
+        return 0.0
+    field_text = " ".join(field_terms)
+    if re.search(rf"\b{re.escape(field_text)}\b", query_text):
+        return 1.0
+    overlap = field_terms.intersection(query_terms)
+    if len(field_terms) > 1 and field_terms.issubset(query_terms):
+        return 1.0
+    if not overlap:
+        return 0.0
+    if field_name in {"artist", "album_artist"}:
+        return 0.85 if any(len(term) >= 5 for term in overlap) else 0.55
+    if field_name == "title":
+        return 0.55 if len(field_terms) == 1 and any(len(term) >= 5 for term in overlap) else 0.35
+    return 0.30
 
 
 def _tag_score(
@@ -515,6 +588,7 @@ def _has_query_evidence(result: SearchResult) -> bool:
     breakdown = result.breakdown
     return bool(
         float(breakdown.get("tag_score") or 0.0) > 0.0
+        or float(breakdown.get("metadata_score") or 0.0) > 0.0
         or float(breakdown.get("text_score") or 0.0) > 0.0
         or float(breakdown.get("semantic_score") or 0.0) > 0.0
         or float(breakdown.get("feedback_score") or 0.0) > 0.0
@@ -523,6 +597,16 @@ def _has_query_evidence(result: SearchResult) -> bool:
 
 def _has_avoid_match(result: SearchResult) -> bool:
     return bool(result.breakdown.get("avoided_tags"))
+
+
+def _has_strong_artist_match(result: SearchResult) -> bool:
+    for match in result.breakdown.get("metadata_matches") or []:
+        if not isinstance(match, dict):
+            continue
+        is_artist_field = match.get("field") in {"artist", "album_artist"}
+        if is_artist_field and float(match.get("score") or 0.0) >= 0.8:
+            return True
+    return False
 
 
 def _has_sort_value(result: SearchResult, intent: SearchIntent) -> bool:
@@ -557,13 +641,25 @@ def _weights(
     has_mood_or_feature_intent = bool(intent.contexts or intent.feature_ranges)
     if use_semantic:
         if has_mood_or_feature_intent:
-            weights = {"semantic": 0.48, "tags": 0.24, "features": 0.20, "text": 0.08}
+            weights = {
+                "semantic": 0.48,
+                "metadata": 0.55,
+                "tags": 0.24,
+                "features": 0.20,
+                "text": 0.08,
+            }
         else:
-            weights = {"semantic": 0.52, "tags": 0.22, "features": 0.16, "text": 0.10}
+            weights = {
+                "semantic": 0.52,
+                "metadata": 0.55,
+                "tags": 0.22,
+                "features": 0.16,
+                "text": 0.10,
+            }
     elif has_mood_or_feature_intent:
-        weights = {"semantic": 0.0, "tags": 0.40, "features": 0.34, "text": 0.26}
+        weights = {"semantic": 0.0, "metadata": 0.55, "tags": 0.40, "features": 0.34, "text": 0.26}
     else:
-        weights = {"semantic": 0.0, "tags": 0.34, "features": 0.18, "text": 0.48}
+        weights = {"semantic": 0.0, "metadata": 0.55, "tags": 0.34, "features": 0.18, "text": 0.48}
     if use_feedback:
         weights["features"] = max(0.0, weights["features"] - 0.03)
         weights["text"] = max(0.0, weights["text"] - 0.02)
@@ -574,6 +670,8 @@ def _weights(
 
 
 def _apply_diversity(results: list[SearchResult], intent: SearchIntent) -> list[SearchResult]:
+    if any(_has_strong_artist_match(result) for result in results):
+        return results
     max_per_artist = intent.diversity.get("max_tracks_per_artist", 2)
     artist_counts: dict[str, int] = {}
     selected: list[SearchResult] = []

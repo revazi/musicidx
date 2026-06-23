@@ -3,7 +3,9 @@ from __future__ import annotations
 from musicidx.db import connect_db, init_db
 from musicidx.metadata import (
     TrackMetadata,
+    apply_filename_fallback,
     build_track_profile,
+    infer_metadata_from_filename,
     metadata_from_ffprobe_json,
     process_metadata,
     save_track_metadata,
@@ -55,6 +57,31 @@ def test_metadata_from_ffprobe_json_normalizes_tags_and_technical_fields():
     assert metadata.channels == 2
 
 
+def test_filename_fallback_infers_artist_title_from_decoded_name(tmp_path):
+    path = tmp_path / "David%20August%20-%20Ingrid.mp3"
+
+    metadata = infer_metadata_from_filename(path)
+
+    assert metadata.artist == "David August"
+    assert metadata.title == "Ingrid"
+
+
+def test_apply_filename_fallback_preserves_real_tags_and_fills_missing_artist(tmp_path):
+    path = tmp_path / "Stephan Bodzin - Singularity.mp3"
+
+    filled = apply_filename_fallback(TrackMetadata(title="Stephan Bodzin - Singularity"), path)
+
+    assert filled.artist == "Stephan Bodzin"
+    assert filled.title == "Singularity"
+
+    preserved = apply_filename_fallback(
+        TrackMetadata(title="Custom Title", artist="Tagged Artist"),
+        path,
+    )
+    assert preserved.artist == "Tagged Artist"
+    assert preserved.title == "Custom Title"
+
+
 def test_save_metadata_updates_tracks_profiles_and_fts(tmp_path):
     db_path = tmp_path / "index.sqlite"
     track_path = tmp_path / "pink_moon.mp3"
@@ -96,7 +123,7 @@ def test_save_metadata_updates_tracks_profiles_and_fts(tmp_path):
         conn.close()
 
 
-def test_metadata_missing_only_does_not_retry_titleless_profiled_tracks(monkeypatch, tmp_path):
+def test_metadata_missing_only_retries_titleless_profiled_tracks(monkeypatch, tmp_path):
     track_path = tmp_path / "untitled.mp3"
     track_path.write_bytes(b"audio")
     conn = connect_db(tmp_path / "index.sqlite")
@@ -109,14 +136,23 @@ def test_metadata_missing_only_does_not_retry_titleless_profiled_tracks(monkeypa
         conn.commit()
 
         def fake_extract_metadata(path):
-            raise AssertionError("title-less profiled track should be skipped")
+            assert path == track_path
+            return TrackMetadata(
+                title="Untitled",
+                duration_sec=120.0,
+                codec="mp3",
+                sample_rate=44100,
+                channels=2,
+            )
 
         monkeypatch.setattr("musicidx.metadata.extract_metadata", fake_extract_metadata)
 
         summary = process_metadata(conn, missing_only=True)
 
-        assert summary.processed == 0
-        assert summary.updated == 0
+        assert summary.processed == 1
+        assert summary.updated == 1
+        row = conn.execute("SELECT title FROM tracks WHERE id = 'track-1'").fetchone()
+        assert row["title"] == "Untitled"
     finally:
         conn.close()
 

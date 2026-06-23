@@ -42,7 +42,7 @@ musicidx embed --batch-size auto --resource-profile auto --json
 Expected use:
 
 - run each indexing step from a UI action or setup wizard
-- use adaptive defaults for one-click indexing; desktop background auto-indexing defaults to the Balanced profile unless changed in Settings
+- use adaptive defaults for one-click indexing; `auto` scales by RAM, and desktop background auto-indexing defaults to the Balanced profile unless changed in Settings
 - use `scan <folder> --json` for app-open background polling
 - run derived indexing steps when `added + modified > 0`; `missing > 0` only needs the scan result to update library state
 - treat `modified > 0` as requiring refresh; scan invalidates stale derived rows for changed files so `--missing-only` steps can rebuild them
@@ -142,7 +142,7 @@ Important result fields:
 | `score` | User-facing relevance score normalized to the top returned result (`1.0` is best for that query). |
 | `why` | Human-readable explanations when `--explain` is used. |
 | `raw_score` | Raw weighted ranking score used internally for ordering/debugging. |
-| `scores` | Compact score components. |
+| `scores` | Compact score components, including semantic, metadata, tags, features, text, and feedback when present. |
 | `matched_tags` | Top matched ML/local tags. |
 
 ### Evaluation and feedback

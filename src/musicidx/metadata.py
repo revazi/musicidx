@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import urllib.parse
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -90,7 +91,7 @@ def is_ffprobe_available() -> bool:
 def extract_metadata(path: Path) -> TrackMetadata:
     """Extract metadata from an audio file using ffprobe JSON output."""
     data = run_ffprobe(path)
-    return metadata_from_ffprobe_json(data)
+    return apply_filename_fallback(metadata_from_ffprobe_json(data), path)
 
 
 def run_ffprobe(path: Path) -> dict[str, Any]:
@@ -186,6 +187,61 @@ def process_metadata(
 
     conn.commit()
     return summary
+
+
+def apply_filename_fallback(metadata: TrackMetadata, path: Path) -> TrackMetadata:
+    """Fill missing title/artist from a readable filename when tags are absent."""
+    fallback = infer_metadata_from_filename(path)
+    parsed_title = infer_metadata_from_text(metadata.title) if metadata.title else None
+    return TrackMetadata(
+        title=(
+            parsed_title.title
+            if parsed_title is not None and not metadata.artist
+            else metadata.title or fallback.title
+        ),
+        artist=(
+            metadata.artist
+            or (parsed_title.artist if parsed_title else None)
+            or fallback.artist
+        ),
+        album=metadata.album,
+        album_artist=metadata.album_artist,
+        genre=metadata.genre,
+        date=metadata.date,
+        track_number=metadata.track_number,
+        disc_number=metadata.disc_number,
+        duration_sec=metadata.duration_sec,
+        codec=metadata.codec,
+        sample_rate=metadata.sample_rate,
+        bit_rate=metadata.bit_rate,
+        channels=metadata.channels,
+    )
+
+
+def infer_metadata_from_filename(path: Path) -> TrackMetadata:
+    """Infer minimal metadata from common `Artist - Title.ext` filenames."""
+    return infer_metadata_from_text(path.stem)
+
+
+def infer_metadata_from_text(value: str) -> TrackMetadata:
+    decoded = urllib.parse.unquote(value).replace("_", " ")
+    cleaned = re.sub(r"\s+", " ", decoded).strip(" ._-—–")
+    cleaned = re.sub(r"^\d{1,3}\s*[-_.]\s*", "", cleaned).strip()
+    if not cleaned:
+        return TrackMetadata()
+
+    parts = re.split(r"\s+[-–—]\s+", cleaned, maxsplit=1)
+    if len(parts) == 2:
+        artist = _clean_filename_part(parts[0])
+        title = _clean_filename_part(parts[1])
+        if artist and title:
+            return TrackMetadata(title=title, artist=artist)
+    return TrackMetadata(title=_clean_filename_part(cleaned))
+
+
+def _clean_filename_part(value: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", value).strip(" ._-—–")
+    return cleaned or None
 
 
 def build_track_profile(metadata: TrackMetadata, path: Path) -> tuple[str, str]:
@@ -343,6 +399,8 @@ def _select_tracks_for_metadata(
             (
                 duration_sec IS NULL
                 OR codec IS NULL
+                OR title IS NULL
+                OR (artist IS NULL AND path LIKE '% - %')
                 OR id NOT IN (SELECT track_id FROM track_profiles)
             )
             """

@@ -4,44 +4,646 @@
     {
       "id": "chill_bar",
       "text": "Give me 10 tracks for a chill bar",
-      "expected_tags": ["chill", "relaxed", "downtempo", "lounge", "warm"],
-      "avoid_tags": ["aggressive", "metal", "chaotic", "hardcore"]
+      "expected_tags": [
+        "chill",
+        "relaxed",
+        "downtempo",
+        "lounge",
+        "warm"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "metal",
+        "chaotic",
+        "hardcore"
+      ]
     },
     {
       "id": "shower_music",
       "text": "Shower music",
-      "expected_tags": ["upbeat", "energetic", "happy", "singalong", "pop"],
-      "avoid_tags": ["drone", "sleep", "very quiet", "ambient"]
+      "expected_tags": [
+        "upbeat",
+        "energetic",
+        "happy",
+        "singalong",
+        "pop"
+      ],
+      "avoid_tags": [
+        "drone",
+        "sleep",
+        "very quiet",
+        "ambient"
+      ]
     },
     {
       "id": "focus_coding_ambient",
       "text": "Focus coding ambient background music",
-      "expected_tags": ["ambient", "instrumental", "calm", "background", "minimal"],
-      "avoid_tags": ["aggressive", "screaming", "chaotic", "party"]
+      "expected_tags": [
+        "ambient",
+        "instrumental",
+        "calm",
+        "background",
+        "minimal"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "screaming",
+        "chaotic",
+        "party"
+      ]
     },
     {
       "id": "sad_reflective",
       "text": "sad reflective melancholic songs",
-      "expected_tags": ["sad", "melancholic", "reflective", "soft", "introspective"],
-      "avoid_tags": ["party", "happy", "aggressive", "workout"]
+      "expected_tags": [
+        "sad",
+        "melancholic",
+        "reflective",
+        "soft",
+        "introspective"
+      ],
+      "avoid_tags": [
+        "party",
+        "happy",
+        "aggressive",
+        "workout"
+      ]
     },
     {
       "id": "party_electronic",
       "text": "party electronic tracks",
-      "expected_tags": ["electronic", "dance", "energetic", "party", "club"],
-      "avoid_tags": ["sleep", "sad", "drone", "very quiet"]
+      "expected_tags": [
+        "electronic",
+        "dance",
+        "energetic",
+        "party",
+        "club"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "sad",
+        "drone",
+        "very quiet"
+      ]
     },
     {
       "id": "aggressive_workout",
       "text": "aggressive workout music",
-      "expected_tags": ["aggressive", "energetic", "intense", "workout", "fast"],
-      "avoid_tags": ["sleep", "ambient", "soft", "calm"]
+      "expected_tags": [
+        "aggressive",
+        "energetic",
+        "intense",
+        "workout",
+        "fast"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "ambient",
+        "soft",
+        "calm"
+      ]
     },
     {
       "id": "sleepy_calm",
       "text": "sleepy calm music",
-      "expected_tags": ["sleep", "calm", "quiet", "ambient", "relaxing"],
-      "avoid_tags": ["aggressive", "party", "workout", "chaotic"]
+      "expected_tags": [
+        "sleep",
+        "calm",
+        "quiet",
+        "ambient",
+        "relaxing"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "party",
+        "workout",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "artist_plus_vibe_stephan_bodzin",
+      "text": "Stephan Bodzin, dance",
+      "expected_tags": [
+        "stephan bodzin",
+        "dance",
+        "electronic",
+        "techno"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "ambient",
+        "calm"
+      ]
+    },
+    {
+      "id": "artist_plus_vibe_david_august",
+      "text": "David August, warm downtempo",
+      "expected_tags": [
+        "david august",
+        "downtempo",
+        "warm",
+        "electronic",
+        "deep"
+      ],
+      "avoid_tags": [
+        "hardcore",
+        "metal",
+        "aggressive",
+        "workout"
+      ]
+    },
+    {
+      "id": "artist_plus_vibe_kollektiv_turmstrasse",
+      "text": "Kollektiv Turmstrasse deep melodic tracks",
+      "expected_tags": [
+        "kollektiv turmstrasse",
+        "deep",
+        "melodic",
+        "electronic",
+        "techno"
+      ],
+      "avoid_tags": [
+        "metal",
+        "hardcore",
+        "screaming",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "artist_plus_mood_radiohead_melancholic",
+      "text": "Radiohead melancholic reflective",
+      "expected_tags": [
+        "radiohead",
+        "melancholic",
+        "sad",
+        "reflective",
+        "dark"
+      ],
+      "avoid_tags": [
+        "party",
+        "disco",
+        "happy",
+        "workout"
+      ]
+    },
+    {
+      "id": "artist_plus_genre_gorillaz_hip_hop",
+      "text": "Gorillaz hip hop groove",
+      "expected_tags": [
+        "gorillaz",
+        "hip hop",
+        "groove",
+        "funk",
+        "electronic"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "ambient",
+        "meditative",
+        "drone"
+      ]
+    },
+    {
+      "id": "artist_exact_prince_romantic_funk",
+      "text": "Prince romantic funky songs",
+      "expected_tags": [
+        "prince",
+        "funk",
+        "soul",
+        "romantic",
+        "love"
+      ],
+      "avoid_tags": [
+        "metal",
+        "hardcore",
+        "ambient",
+        "drone"
+      ]
+    },
+    {
+      "id": "artist_exact_dire_straits_slow",
+      "text": "Dire Straits slow relaxed guitar",
+      "expected_tags": [
+        "dire straits",
+        "slow",
+        "relaxed",
+        "guitar",
+        "rock"
+      ],
+      "avoid_tags": [
+        "party",
+        "techno",
+        "hardcore",
+        "aggressive"
+      ]
+    },
+    {
+      "id": "dark_ambient_not_aggressive",
+      "text": "dark ambient but not aggressive",
+      "expected_tags": [
+        "dark",
+        "ambient",
+        "deep",
+        "background",
+        "moody"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "party",
+        "happy"
+      ]
+    },
+    {
+      "id": "not_aggressive_dance",
+      "text": "dance music but not aggressive",
+      "expected_tags": [
+        "dance",
+        "house",
+        "groove",
+        "electronic",
+        "upbeat"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "warm_lounge_bar",
+      "text": "warm lounge bar music",
+      "expected_tags": [
+        "warm",
+        "lounge",
+        "bar",
+        "relaxed",
+        "soul"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal",
+        "workout"
+      ]
+    },
+    {
+      "id": "cooking_background",
+      "text": "music for cooking dinner in the background",
+      "expected_tags": [
+        "background",
+        "warm",
+        "relaxing",
+        "groove",
+        "soul"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "chaotic",
+        "hardcore",
+        "screaming"
+      ]
+    },
+    {
+      "id": "late_night_driving",
+      "text": "late night driving electronic",
+      "expected_tags": [
+        "electronic",
+        "deep",
+        "dark",
+        "driving",
+        "night"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "meditative",
+        "very quiet",
+        "acoustic"
+      ]
+    },
+    {
+      "id": "sunny_morning_upbeat",
+      "text": "sunny morning upbeat music",
+      "expected_tags": [
+        "happy",
+        "upbeat",
+        "energetic",
+        "summer",
+        "positive"
+      ],
+      "avoid_tags": [
+        "sad",
+        "dark",
+        "drone",
+        "sleep"
+      ]
+    },
+    {
+      "id": "rainy_day_reflective",
+      "text": "rainy day reflective music",
+      "expected_tags": [
+        "reflective",
+        "sad",
+        "melancholic",
+        "soft",
+        "deep"
+      ],
+      "avoid_tags": [
+        "party",
+        "workout",
+        "happy",
+        "hardcore"
+      ]
+    },
+    {
+      "id": "minimal_techno_focus",
+      "text": "minimal techno for focus",
+      "expected_tags": [
+        "minimal",
+        "techno",
+        "focus",
+        "background",
+        "deep"
+      ],
+      "avoid_tags": [
+        "vocal",
+        "screaming",
+        "party",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "groovy_house_party",
+      "text": "groovy house party tracks",
+      "expected_tags": [
+        "house",
+        "groovy",
+        "dance",
+        "party",
+        "electronic"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "sad",
+        "ambient",
+        "drone"
+      ]
+    },
+    {
+      "id": "funk_soul_dance",
+      "text": "funky soul dance songs",
+      "expected_tags": [
+        "funk",
+        "soul",
+        "dance",
+        "disco",
+        "groove"
+      ],
+      "avoid_tags": [
+        "ambient",
+        "drone",
+        "sleep",
+        "metal"
+      ]
+    },
+    {
+      "id": "mellow_hip_hop_instrumental",
+      "text": "mellow instrumental hip hop beats",
+      "expected_tags": [
+        "hip hop",
+        "instrumental",
+        "mellow",
+        "beats",
+        "downtempo"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "party",
+        "metal",
+        "hardcore"
+      ]
+    },
+    {
+      "id": "no_vocals_background",
+      "text": "background music with no vocals",
+      "expected_tags": [
+        "instrumental",
+        "background",
+        "ambient",
+        "minimal",
+        "electronic"
+      ],
+      "avoid_tags": [
+        "vocal",
+        "vocals",
+        "singalong",
+        "singer"
+      ]
+    },
+    {
+      "id": "vocal_singalong_happy",
+      "text": "happy vocal singalong songs",
+      "expected_tags": [
+        "happy",
+        "vocal",
+        "singalong",
+        "pop",
+        "fun"
+      ],
+      "avoid_tags": [
+        "instrumental",
+        "ambient",
+        "drone",
+        "sleep"
+      ]
+    },
+    {
+      "id": "soft_electronic_work",
+      "text": "soft electronic music for work",
+      "expected_tags": [
+        "soft",
+        "electronic",
+        "background",
+        "focus",
+        "deep"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "party",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "high_bpm_workout",
+      "text": "highest BPM workout tracks",
+      "expected_tags": [
+        "fast",
+        "energetic",
+        "workout",
+        "high bpm",
+        "powerful"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "slow",
+        "ambient",
+        "calm"
+      ]
+    },
+    {
+      "id": "slowest_relaxing",
+      "text": "slowest relaxing songs",
+      "expected_tags": [
+        "slow",
+        "relaxing",
+        "calm",
+        "soft",
+        "downtempo"
+      ],
+      "avoid_tags": [
+        "fast",
+        "workout",
+        "party",
+        "aggressive"
+      ]
+    },
+    {
+      "id": "most_danceable",
+      "text": "most danceable tracks",
+      "expected_tags": [
+        "dance",
+        "danceable",
+        "disco",
+        "house",
+        "groove"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "drone",
+        "ambient",
+        "meditative"
+      ]
+    },
+    {
+      "id": "least_aggressive_background",
+      "text": "least aggressive background music",
+      "expected_tags": [
+        "background",
+        "soft",
+        "calm",
+        "relaxing",
+        "ambient"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "casual_greeting_wazaap",
+      "text": "wazaap",
+      "expected_tags": [
+        "upbeat",
+        "happy",
+        "fun",
+        "social",
+        "energetic"
+      ],
+      "avoid_tags": [
+        "sad",
+        "sleep",
+        "dark",
+        "drone"
+      ]
+    },
+    {
+      "id": "conversational_tired",
+      "text": "I'm tired but don't want to sleep yet",
+      "expected_tags": [
+        "calm",
+        "mellow",
+        "soft",
+        "relaxing",
+        "background"
+      ],
+      "avoid_tags": [
+        "workout",
+        "aggressive",
+        "hardcore",
+        "party"
+      ]
+    },
+    {
+      "id": "conversational_pregame",
+      "text": "let's get ready to go out",
+      "expected_tags": [
+        "party",
+        "upbeat",
+        "energetic",
+        "dance",
+        "fun"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "sad",
+        "ambient",
+        "drone"
+      ]
+    },
+    {
+      "id": "romantic_date_night",
+      "text": "romantic date night music",
+      "expected_tags": [
+        "romantic",
+        "love",
+        "soft",
+        "soul",
+        "relaxing"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal",
+        "chaotic"
+      ]
+    },
+    {
+      "id": "after_hours_deep",
+      "text": "after hours deep electronic",
+      "expected_tags": [
+        "deep",
+        "electronic",
+        "dark",
+        "techno",
+        "house"
+      ],
+      "avoid_tags": [
+        "happy",
+        "pop",
+        "singalong",
+        "children"
+      ]
+    },
+    {
+      "id": "beach_summer_positive",
+      "text": "beach summer positive vibes",
+      "expected_tags": [
+        "summer",
+        "happy",
+        "positive",
+        "upbeat",
+        "warm"
+      ],
+      "avoid_tags": [
+        "sad",
+        "dark",
+        "metal",
+        "aggressive"
+      ]
     }
   ]
 }

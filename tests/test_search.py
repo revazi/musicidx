@@ -127,6 +127,52 @@ def test_search_music_sorts_by_highest_bpm(tmp_path):
         conn.close()
 
 
+def test_search_music_prioritizes_explicit_artist_plus_vibe_query(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        for index, title in enumerate(["Singularity", "Zulu", "Powers Of Ten"], start=1):
+            _insert_track(
+                conn,
+                f"bodzin-{index}",
+                tmp_path / f"bodzin-{index}.mp3",
+                title=title,
+                artist="Stephan Bodzin",
+                profile_text=f"Artist: Stephan Bodzin. Title: {title}. medium danceability",
+                tags=[("essentia:genre", "electronic---techno", 0.45)],
+                energy=0.55,
+                aggression=0.30,
+                danceability=0.82,
+                bpm=123.0,
+            )
+        _insert_track(
+            conn,
+            "dance-competitor",
+            tmp_path / "competitor.mp3",
+            title="Peak Dance Floor",
+            artist="Other Artist",
+            profile_text="dance party energetic house floor",
+            tags=[("essentia:mood", "party", 0.9), ("essentia:mood", "energetic", 0.8)],
+            energy=0.95,
+            aggression=0.55,
+            danceability=0.96,
+            bpm=128.0,
+        )
+
+        response = search_music(conn, "Stephan Bodzin, dance", limit=4, explain=True)
+
+        assert [result.artist for result in response.results[:3]] == [
+            "Stephan Bodzin",
+            "Stephan Bodzin",
+            "Stephan Bodzin",
+        ]
+        assert response.results[0].breakdown["metadata_score"] == 1.0
+        assert response.results[0].score == 1.0
+        assert "metadata match" in "; ".join(response.results[0].explanation)
+    finally:
+        conn.close()
+
+
 def test_search_music_returns_normalized_relevance_score(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:

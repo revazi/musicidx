@@ -177,17 +177,22 @@ def recommend_indexing_plan(
         basic_workers = 1
         embedding_batch_size = 8
         tag_batch_size = 3
-        basic_chunk_sec = 30.0
-    elif effective_profile == "balanced":
-        basic_workers = min(2, _cpu_room(cpu_count))
-        embedding_batch_size = 16
-        tag_batch_size = 5
         basic_chunk_sec = 60.0
-    else:
+    elif effective_profile == "balanced":
+        basic_workers = min(3, _cpu_room(cpu_count))
+        embedding_batch_size = 24
+        tag_batch_size = 8
+        basic_chunk_sec = 120.0
+    elif effective_profile == "high":
         basic_workers = min(4, max(1, cpu_count // 2))
         embedding_batch_size = 32
         tag_batch_size = 10
-        basic_chunk_sec = 120.0
+        basic_chunk_sec = 300.0
+    else:
+        basic_workers = min(6, max(1, cpu_count // 2))
+        embedding_batch_size = 48
+        tag_batch_size = 14
+        basic_chunk_sec = 600.0
 
     warning = None
     memory_gb = resources.total_memory_gb
@@ -335,8 +340,10 @@ def _effective_profile(profile: str, resources: SystemResources) -> tuple[str, s
         return "low", "memory unknown; using low-impact defaults"
     if memory_gb < 16:
         return "low", f"{memory_gb:.1f}GB RAM detected"
-    if memory_gb < 64:
+    if memory_gb < 24:
         return "balanced", f"{memory_gb:.1f}GB RAM detected"
+    if memory_gb < 32:
+        return "high", f"{memory_gb:.1f}GB RAM detected"
     return "full", f"{memory_gb:.1f}GB RAM detected"
 
 

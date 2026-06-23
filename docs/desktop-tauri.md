@@ -88,7 +88,7 @@ The Tauri UI can:
 - show manual and background pipeline progress by step, runtime, counts, and memory diagnostics in a floating progress panel with a Cancel button
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
 - choose a manual indexing type: Full-track chunked or Full-track larger chunks
-- choose separate manual and background indexing resource profiles: auto, low, balanced, or full
+- choose separate manual and background indexing resource profiles: auto, low, balanced, or full; auto scales by RAM and may resolve to internal low/balanced/high/full tiers
 - default background auto-indexing to Balanced so it is faster than conservative Auto/Low but less aggressive than Full
 - run quick basic audio analysis in adaptive chunks to lower peak RAM
 - run ML tag analysis in adaptive subprocess batches to lower peak RAM

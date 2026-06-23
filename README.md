@@ -226,7 +226,7 @@ uv run musicidx embed --model .musicidx-models/all-MiniLM-L6-v2 --batch-size aut
 Notes:
 
 - `--resource-profile auto` scales workers, chunk size, and batch size from detected RAM/CPU.
-- Available profiles: `auto`, `low`, `balanced`, `full`.
+- Available requested profiles: `auto`, `low`, `balanced`, `full`. `auto` scales by RAM: low under 16GB, balanced around 16GB, high around 24GB, and full at 32GB+.
 - `analyze-basic --chunked` analyzes the whole track in sequential chunks to reduce peak RAM for long tracks.
 - `analyze-tags` is the most memory-sensitive step; subprocess batches are enabled by default so TensorFlow/Essentia memory is reclaimed between small batches.
 - Avoid `embed --refresh` unless you intentionally want to recompute embeddings.
