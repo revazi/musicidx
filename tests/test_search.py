@@ -619,6 +619,9 @@ def test_feedback_command_persists_query_aware_feedback(tmp_path):
     try:
         response = search_music(conn, "chill", limit=1, explain=True)
         assert response.results[0].breakdown["feedback_score"] == 1.0
+        assert response.results[0].breakdown["saved_feedback_rating"] == 1
+        concise = _search_payload(response, db_path=str(db_path), concise=True)
+        assert concise["results"][0]["saved_feedback_rating"] == "good"
     finally:
         conn.close()
 
@@ -672,6 +675,8 @@ def test_judge_command_persists_feedback_and_feedback_affects_ranking(tmp_path):
         response = search_music(conn, "chill", limit=2, explain=True)
         assert response.results[0].track_id == "good-track"
         assert response.results[0].breakdown["feedback_score"] > 0
+        assert response.results[0].breakdown["saved_feedback_rating"] == 1
+        assert response.results[1].breakdown["saved_feedback_rating"] == -1
         assert "positive feedback boost" in "; ".join(response.results[0].explanation)
     finally:
         conn.close()

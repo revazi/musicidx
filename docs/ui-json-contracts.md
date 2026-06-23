@@ -142,6 +142,7 @@ Important result fields:
 | `score` | User-facing relevance score normalized to the top returned result (`1.0` is best for that query). |
 | `why` | Human-readable explanations when `--explain` is used. |
 | `raw_score` | Raw weighted ranking score used internally for ordering/debugging. |
+| `saved_feedback_rating` | Latest exact-query judgment for this result: `good`, `bad`, `neutral`, or `null`. |
 | `scores` | Compact score components, including semantic, metadata, tags, features, text, and feedback when present. |
 | `matched_tags` | Top matched ML/local tags. |
 

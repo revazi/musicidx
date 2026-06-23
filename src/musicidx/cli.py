@@ -2003,6 +2003,7 @@ def _concise_result(result: Any) -> dict[str, Any]:
         "genre": result.genre,
         "score": result.score,
         "raw_score": round(float(breakdown.get("raw_score", result.score)), 6),
+        "saved_feedback_rating": _rating_label(breakdown.get("saved_feedback_rating")),
         "why": result.explanation,
         "scores": {
             "semantic": round(float(breakdown.get("semantic_score", 0.0)), 6),
@@ -2021,6 +2022,20 @@ def _concise_result(result: Any) -> dict[str, Any]:
             for tag in (breakdown.get("matched_tags") or [])[:5]
         ],
     }
+
+
+def _rating_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return None
+    if rating > 0:
+        return "good"
+    if rating < 0:
+        return "bad"
+    return "neutral"
 
 
 def _maybe_parse_with_llm(

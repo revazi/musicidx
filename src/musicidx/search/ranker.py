@@ -9,6 +9,7 @@ from typing import Any
 
 from musicidx.analyzer.embeddings import EmbeddingError, search_semantic
 from musicidx.search.explain import build_explanation
+from musicidx.search.feedback import latest_feedback_for_query
 from musicidx.search.intent import (
     IntentHints,
     SearchIntent,
@@ -132,7 +133,11 @@ def search_music(
     filtered = _filter_weak_results(ranked, intent)
     sorted_results = _apply_explicit_sort(filtered, intent)
     diversified = sorted_results if intent.sort_by else _apply_diversity(sorted_results, intent)
-    limited_results = diversified[: intent.limit]
+    limited_results = _with_saved_feedback(
+        conn,
+        diversified[: intent.limit],
+        query=query,
+    )
     display_results = _with_display_scores(limited_results)
     diagnostics = {
         "candidate_count": len(track_rows),
@@ -155,6 +160,40 @@ def search_music(
         results=display_results,
         diagnostics=diagnostics,
     )
+
+
+def _with_saved_feedback(
+    conn: sqlite3.Connection,
+    results: list[SearchResult],
+    *,
+    query: str,
+) -> list[SearchResult]:
+    ratings = latest_feedback_for_query(
+        conn,
+        query=query,
+        track_ids=[result.track_id for result in results],
+    )
+    if not ratings:
+        return results
+    output: list[SearchResult] = []
+    for result in results:
+        breakdown = dict(result.breakdown)
+        if result.track_id in ratings:
+            breakdown["saved_feedback_rating"] = ratings[result.track_id]
+        output.append(
+            SearchResult(
+                track_id=result.track_id,
+                path=result.path,
+                title=result.title,
+                artist=result.artist,
+                album=result.album,
+                genre=result.genre,
+                score=result.score,
+                breakdown=breakdown,
+                explanation=result.explanation,
+            )
+        )
+    return output
 
 
 def _with_display_scores(results: list[SearchResult]) -> list[SearchResult]:
@@ -661,9 +700,9 @@ def _weights(
     else:
         weights = {"semantic": 0.0, "metadata": 0.55, "tags": 0.34, "features": 0.18, "text": 0.48}
     if use_feedback:
-        weights["features"] = max(0.0, weights["features"] - 0.03)
-        weights["text"] = max(0.0, weights["text"] - 0.02)
-        weights["feedback"] = 0.05
+        weights["features"] = max(0.0, weights["features"] - 0.04)
+        weights["text"] = max(0.0, weights["text"] - 0.03)
+        weights["feedback"] = 0.18
     else:
         weights["feedback"] = 0.0
     return weights

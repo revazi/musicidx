@@ -76,6 +76,35 @@ def save_track_feedback(
     return feedback_id
 
 
+def latest_feedback_for_query(
+    conn: sqlite3.Connection,
+    *,
+    query: str,
+    track_ids: list[str],
+) -> dict[str, int]:
+    """Return the latest exact-query rating for each requested track."""
+    if not track_ids:
+        return {}
+    placeholders = ",".join("?" for _ in track_ids)
+    rows = conn.execute(
+        f"""
+        SELECT f.track_id, f.rating
+        FROM feedback f
+        JOIN search_events se ON se.id = f.search_event_id
+        WHERE LOWER(COALESCE(se.query, '')) = LOWER(?)
+          AND f.track_id IN ({placeholders})
+        ORDER BY f.created_at DESC, f.id DESC
+        """,
+        [query, *track_ids],
+    ).fetchall()
+    output: dict[str, int] = {}
+    for row in rows:
+        track_id = row["track_id"]
+        if track_id not in output:
+            output[track_id] = int(row["rating"])
+    return output
+
+
 def feedback_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     """Return compact feedback counts for diagnostics/UI use."""
     row = conn.execute(

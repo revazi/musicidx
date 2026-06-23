@@ -80,6 +80,7 @@ type SearchResult = {
   why?: string[];
   scores?: Record<string, number>;
   matched_tags?: Array<{ tag: string; score: number; source: string }>;
+  saved_feedback_rating?: "good" | "bad" | "neutral" | null;
 };
 
 type SearchPayload = {
@@ -1630,7 +1631,11 @@ function ResultCard({
   onReveal: (result: SearchResult) => Promise<void>;
   playingTrackId: string | null;
 }) {
-  const [savedRating, setSavedRating] = useState<string | null>(null);
+  const [savedRating, setSavedRating] = useState<"good" | "bad" | "neutral" | null>(
+    result.saved_feedback_rating ?? null,
+  );
+  const [feedbackPending, setFeedbackPending] = useState<"good" | "bad" | "neutral" | null>(null);
+  const [feedbackError, setFeedbackError] = useState("");
   const [expanded, setExpanded] = useState(false);
   const title = result.title || result.path.split(/[\\/]/).pop() || result.track_id;
   const meta = [result.artist, result.album, result.genre].filter(Boolean).join(" · ");
@@ -1642,9 +1647,23 @@ function ResultCard({
     why.length > 180 || tagText.length > 140 || result.path.length > 120 || title.length > 80;
   const isPlaying = playingTrackId === result.track_id;
 
+  useEffect(() => {
+    setSavedRating(result.saved_feedback_rating ?? null);
+    setFeedbackError("");
+    setFeedbackPending(null);
+  }, [result.track_id, result.saved_feedback_rating]);
+
   async function rate(rating: "good" | "bad" | "neutral") {
-    await onFeedback(result, rating);
-    setSavedRating(rating);
+    setFeedbackPending(rating);
+    setFeedbackError("");
+    try {
+      await onFeedback(result, rating);
+      setSavedRating(rating);
+    } catch (error) {
+      setFeedbackError(formatValue(error));
+    } finally {
+      setFeedbackPending(null);
+    }
   }
 
   return (
@@ -1696,18 +1715,52 @@ function ResultCard({
             Show
           </Button>
         </div>
-        <div className="flex flex-wrap gap-2 sm:justify-end">
-          <Button size="sm" variant="outline" disabled={busy || savedRating === "good"} onClick={() => rate("good")}>
-            {savedRating === "good" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <ThumbsUp className="h-3.5 w-3.5" />}
-            Good
-          </Button>
-          <Button size="sm" variant="outline" disabled={busy || savedRating === "bad"} onClick={() => rate("bad")}>
-            <ThumbsDown className="h-3.5 w-3.5" />
-            Bad
-          </Button>
-          <Button size="sm" variant="ghost" disabled={busy || savedRating === "neutral"} onClick={() => rate("neutral")}>
-            Neutral
-          </Button>
+        <div className="grid gap-1 sm:justify-items-end">
+          <div className="flex flex-wrap gap-2 sm:justify-end">
+            <Button
+              size="sm"
+              variant={savedRating === "good" ? "default" : "outline"}
+              disabled={busy || feedbackPending !== null || savedRating === "good"}
+              onClick={() => rate("good")}
+            >
+              {feedbackPending === "good" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : savedRating === "good" ? (
+                <CheckCircle2 className="h-3.5 w-3.5" />
+              ) : (
+                <ThumbsUp className="h-3.5 w-3.5" />
+              )}
+              Good
+            </Button>
+            <Button
+              size="sm"
+              variant={savedRating === "bad" ? "destructive" : "outline"}
+              disabled={busy || feedbackPending !== null || savedRating === "bad"}
+              onClick={() => rate("bad")}
+            >
+              {feedbackPending === "bad" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ThumbsDown className="h-3.5 w-3.5" />
+              )}
+              Bad
+            </Button>
+            <Button
+              size="sm"
+              variant={savedRating === "neutral" ? "secondary" : "ghost"}
+              disabled={busy || feedbackPending !== null || savedRating === "neutral"}
+              onClick={() => rate("neutral")}
+            >
+              {feedbackPending === "neutral" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Neutral
+            </Button>
+          </div>
+          {savedRating ? (
+            <p className="text-xs text-muted-foreground">Judged: {savedRating}</p>
+          ) : null}
+          {feedbackError ? (
+            <p className="max-w-xs wrap-anywhere text-xs text-destructive">{feedbackError}</p>
+          ) : null}
         </div>
       </div>
     </div>
