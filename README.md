@@ -8,12 +8,14 @@ Implemented:
 
 - SQLite database and migrations
 - recursive audio scanner
-- metadata extraction with `ffprobe`
+- metadata extraction with `ffprobe`, filename fallback, provenance claims, normalized artist/title fields, and metadata confidence
 - SQLite FTS text search
 - Chromaprint fingerprinting with `fpcalc`
 - duplicate / moved-file candidate reporting
 - basic audio analysis with `librosa`
 - optional local Essentia mood/genre tags with subprocess batching for lower peak RAM
+- versioned track profile JSON with separate semantic `embedding_text`
+- local feature-derived tags and context-fit scores for vague/contextual search
 - optional semantic profile embeddings with `sentence-transformers`
 - hybrid natural-language search
 - optional Gemini/OpenAI intent parsing with local-only ranking

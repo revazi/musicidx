@@ -52,10 +52,12 @@ from musicidx.config import (
     resolve_models_path,
 )
 from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
+from musicidx.derived import rebuild_derived_signals
 from musicidx.failures import list_failed_tracks, record_track_error, reset_failed_tracks
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
 from musicidx.missing import list_missing_tracks, prune_missing_tracks
+from musicidx.profiles import rebuild_track_profiles
 from musicidx.resources import (
     RuntimeTimer,
     recommend_indexing_plan,
@@ -914,6 +916,82 @@ def metadata_command(
     table.add_column("Metric")
     table.add_column("Count", justify="right")
     for key in ["processed", "updated", "skipped", "errors"]:
+        table.add_row(key, str(payload[key]))
+    console.print(f"[bold]Database:[/bold] {db_path}")
+    console.print(table)
+
+
+@app.command("rebuild-derived")
+def rebuild_derived_command(
+    db: DbOption = None,
+    track_id: TrackIdOption = None,
+    include_missing: IncludeMissingOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Rebuild local feature-derived tags and listening context-fit scores."""
+    timer = RuntimeTimer()
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        summary = rebuild_derived_signals(
+            conn,
+            track_id=track_id,
+            include_missing=include_missing,
+        )
+    finally:
+        conn.close()
+
+    payload = with_runtime_diagnostics(
+        {"db_path": str(db_path), **summary.as_dict()},
+        timer,
+    )
+    if json_output:
+        _print_json(payload)
+        return
+
+    table = Table(title="Derived signal rebuild summary")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    for key in ["processed", "updated", "skipped", "errors", "tags_written", "contexts_written"]:
+        table.add_row(key, str(payload[key]))
+    console.print(f"[bold]Database:[/bold] {db_path}")
+    console.print(table)
+
+
+@app.command("rebuild-profiles")
+def rebuild_profiles_command(
+    db: DbOption = None,
+    track_id: TrackIdOption = None,
+    include_missing: IncludeMissingOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Regenerate versioned track profile JSON/text from stored metadata/features/tags."""
+    timer = RuntimeTimer()
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        summary = rebuild_track_profiles(
+            conn,
+            track_id=track_id,
+            include_missing=include_missing,
+        )
+    finally:
+        conn.close()
+
+    payload = with_runtime_diagnostics(
+        {"db_path": str(db_path), **summary.as_dict()},
+        timer,
+    )
+    if json_output:
+        _print_json(payload)
+        return
+
+    table = Table(title="Profile rebuild summary")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    for key in ["processed", "updated", "skipped", "errors", "schema_version"]:
         table.add_row(key, str(payload[key]))
     console.print(f"[bold]Database:[/bold] {db_path}")
     console.print(table)
@@ -2010,6 +2088,7 @@ def _concise_result(result: Any) -> dict[str, Any]:
             "metadata": round(float(breakdown.get("metadata_score", 0.0)), 6),
             "tags": round(float(breakdown.get("tag_score", 0.0)), 6),
             "features": round(float(breakdown.get("feature_score", 0.0)), 6),
+            "context": round(float(breakdown.get("context_score", 0.0)), 6),
             "text": round(float(breakdown.get("text_score", 0.0)), 6),
             "feedback": round(float(breakdown.get("feedback_score", 0.0)), 6),
         },

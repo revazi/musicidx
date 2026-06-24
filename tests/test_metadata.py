@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
+
 from musicidx.db import connect_db, init_db
 from musicidx.metadata import (
+    MetadataExtractionResult,
     TrackMetadata,
     apply_filename_fallback,
+    build_metadata_extraction_result,
     build_track_profile,
     infer_metadata_from_filename,
     metadata_from_ffprobe_json,
+    normalize_metadata_value,
     process_metadata,
     save_track_metadata,
     search_text,
@@ -82,6 +87,26 @@ def test_apply_filename_fallback_preserves_real_tags_and_fills_missing_artist(tm
     assert preserved.title == "Custom Title"
 
 
+def test_metadata_extraction_result_tracks_claims_and_selected_values(tmp_path):
+    path = tmp_path / "Stephan Bodzin - Singularity.mp3"
+    result = build_metadata_extraction_result(
+        TrackMetadata(title="Stephan Bodzin - Singularity", genre="Techno"),
+        path,
+    )
+
+    assert result.metadata.artist == "Stephan Bodzin"
+    assert result.metadata.title == "Singularity"
+    assert normalize_metadata_value("Stéphan & Bodzin") == "stephan and bodzin"
+    selected = {
+        (claim.field_name, claim.source): claim
+        for claim in result.claims
+        if claim.selected
+    }
+    assert selected[("artist", "derived")].value_text == "Stephan Bodzin"
+    assert selected[("title", "derived")].value_text == "Singularity"
+    assert selected[("genre", "ffprobe")].value_text == "Techno"
+
+
 def test_save_metadata_updates_tracks_profiles_and_fts(tmp_path):
     db_path = tmp_path / "index.sqlite"
     track_path = tmp_path / "pink_moon.mp3"
@@ -107,13 +132,48 @@ def test_save_metadata_updates_tracks_profiles_and_fts(tmp_path):
         conn.commit()
 
         row = conn.execute(
-            "SELECT title, artist, codec FROM tracks WHERE id = 'track-1'"
+            """
+            SELECT title, artist, codec, title_norm, artist_norm, artist_title_norm,
+                   metadata_confidence
+            FROM tracks WHERE id = 'track-1'
+            """
         ).fetchone()
-        assert dict(row) == {"title": "Pink Moon", "artist": "Nick Drake", "codec": "mp3"}
+        assert row["title"] == "Pink Moon"
+        assert row["artist"] == "Nick Drake"
+        assert row["codec"] == "mp3"
+        assert row["title_norm"] == "pink moon"
+        assert row["artist_norm"] == "nick drake"
+        assert row["artist_title_norm"] == "nick drake pink moon"
+        assert row["metadata_confidence"] == 0.7
         profile_row = conn.execute(
-            "SELECT profile_text FROM track_profiles WHERE track_id = 'track-1'"
+            """
+            SELECT profile_text, embedding_text, profile_json, profile_schema_version,
+                   source_fingerprint
+            FROM track_profiles WHERE track_id = 'track-1'
+            """
         ).fetchone()
         assert "Artist: Nick Drake." in profile_row["profile_text"]
+        assert "Nick Drake - Pink Moon" in profile_row["embedding_text"]
+        profile_doc = json.loads(profile_row["profile_json"])
+        assert profile_doc["schema_version"] == 2
+        assert profile_doc["identity"]["normalized"]["artist_norm"] == "nick drake"
+        assert profile_doc["identity"]["confidence"]["overall"] == 0.7
+        assert profile_doc["search_text"]["embedding_text"] == profile_row["embedding_text"]
+        assert profile_row["profile_schema_version"] == 2
+        assert profile_row["source_fingerprint"]
+
+        claim_rows = conn.execute(
+            """
+            SELECT field_name, value_text, source, selected
+            FROM track_metadata_claims
+            WHERE track_id = 'track-1'
+            ORDER BY field_name
+            """
+        ).fetchall()
+        claims = {row["field_name"]: row for row in claim_rows}
+        assert claims["artist"]["value_text"] == "Nick Drake"
+        assert claims["artist"]["source"] == "derived"
+        assert claims["artist"]["selected"] == 1
 
         results = search_text(conn, "Nick Drake")
         assert len(results) == 1
@@ -135,17 +195,21 @@ def test_metadata_missing_only_retries_titleless_profiled_tracks(monkeypatch, tm
         save_track_metadata(conn, "track-1", metadata, profile_text, profile_json)
         conn.commit()
 
-        def fake_extract_metadata(path):
+        def fake_extract_metadata_result(path):
             assert path == track_path
-            return TrackMetadata(
+            metadata = TrackMetadata(
                 title="Untitled",
                 duration_sec=120.0,
                 codec="mp3",
                 sample_rate=44100,
                 channels=2,
             )
+            return MetadataExtractionResult(metadata=metadata, claims=[])
 
-        monkeypatch.setattr("musicidx.metadata.extract_metadata", fake_extract_metadata)
+        monkeypatch.setattr(
+            "musicidx.metadata.extract_metadata_result",
+            fake_extract_metadata_result,
+        )
 
         summary = process_metadata(conn, missing_only=True)
 
@@ -165,9 +229,9 @@ def test_process_metadata_uses_extractor_and_populates_search(monkeypatch, tmp_p
         init_db(conn)
         _insert_track(conn, "track-1", track_path)
 
-        def fake_extract_metadata(path):
+        def fake_extract_metadata_result(path):
             assert path == track_path
-            return TrackMetadata(
+            metadata = TrackMetadata(
                 title="Svefn-g-englar",
                 artist="Sigur Ros",
                 album="Agaetis byrjun",
@@ -175,8 +239,12 @@ def test_process_metadata_uses_extractor_and_populates_search(monkeypatch, tmp_p
                 duration_sec=600.0,
                 codec="flac",
             )
+            return MetadataExtractionResult(metadata=metadata, claims=[])
 
-        monkeypatch.setattr("musicidx.metadata.extract_metadata", fake_extract_metadata)
+        monkeypatch.setattr(
+            "musicidx.metadata.extract_metadata_result",
+            fake_extract_metadata_result,
+        )
         summary = process_metadata(conn)
 
         assert summary.processed == 1

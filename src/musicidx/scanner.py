@@ -249,6 +249,7 @@ def _clear_stale_track_outputs(conn: sqlite3.Connection, track_id: str) -> None:
     )
     conn.execute("DELETE FROM audio_features WHERE track_id = ?", (track_id,))
     conn.execute("DELETE FROM track_tags WHERE track_id = ?", (track_id,))
+    conn.execute("DELETE FROM track_context_fit WHERE track_id = ?", (track_id,))
     conn.execute("DELETE FROM track_profiles WHERE track_id = ?", (track_id,))
     conn.execute("DELETE FROM embeddings WHERE track_id = ?", (track_id,))
     conn.execute("DELETE FROM tracks_fts WHERE track_id = ?", (track_id,))

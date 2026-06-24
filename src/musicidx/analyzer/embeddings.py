@@ -95,11 +95,12 @@ def process_embeddings(
     pending: list[sqlite3.Row] = []
 
     for row in rows:
+        embedding_text = row["embedding_text"] or row["profile_text"]
         is_current = _embedding_is_current(
             conn,
             row["track_id"],
             model_name,
-            row["profile_text"],
+            embedding_text,
         )
         if not refresh and is_current:
             summary.skipped += 1
@@ -107,7 +108,7 @@ def process_embeddings(
         pending.append(row)
 
     for batch in _chunks(pending, max(1, batch_size)):
-        texts = [row["profile_text"] for row in batch]
+        texts = [row["embedding_text"] or row["profile_text"] for row in batch]
         try:
             vectors = embed_texts(texts, model_name=model_name)
             if len(vectors) != len(batch):
@@ -122,7 +123,7 @@ def process_embeddings(
             save_profile_embedding(
                 conn,
                 row["track_id"],
-                row["profile_text"],
+                row["embedding_text"] or row["profile_text"],
                 vector,
                 model_name=model_name,
             )
@@ -254,7 +255,7 @@ def _select_profiles_for_embedding(
 
     return conn.execute(
         f"""
-        SELECT t.id AS track_id, p.profile_text
+        SELECT t.id AS track_id, p.profile_text, p.embedding_text
         FROM track_profiles p
         JOIN tracks t ON t.id = p.track_id
         WHERE {' AND '.join(clauses)}

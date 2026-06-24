@@ -34,6 +34,14 @@ def build_explanation(breakdown: dict[str, Any]) -> list[str]:
         )
         lines.append(f"penalized avoided tags: {tag_text}")
 
+    matched_contexts = breakdown.get("matched_contexts") or []
+    if matched_contexts:
+        context_text = ", ".join(
+            f"{item['context'].replace('_', ' ')} {item['score']:.2f}"
+            for item in matched_contexts[:3]
+        )
+        lines.append(f"context fit: {context_text}")
+
     feature_reasons = breakdown.get("feature_reasons") or []
     lines.extend(feature_reasons[:5])
 

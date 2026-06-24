@@ -510,6 +510,65 @@ def test_export_command_writes_m3u_playlist(tmp_path):
     assert str(track_path.resolve()) in content
 
 
+def test_context_fit_boosts_context_queries(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "club-track",
+            tmp_path / "club.mp3",
+            title="Club Tool",
+            artist="Artist A",
+            profile_text="high energy dance track",
+            tags=[],
+            energy=0.85,
+            aggression=0.20,
+            danceability=0.92,
+            bpm=124.0,
+        )
+        _insert_track(
+            conn,
+            "sleep-track",
+            tmp_path / "sleep.mp3",
+            title="Sleep Pad",
+            artist="Artist B",
+            profile_text="soft calm background",
+            tags=[],
+            energy=0.20,
+            aggression=0.05,
+            danceability=0.20,
+            bpm=72.0,
+        )
+        now = "2026-01-01T00:00:00+00:00"
+        conn.execute(
+            """
+            INSERT INTO track_context_fit (
+                track_id, context, score, confidence, evidence_json, updated_at
+            ) VALUES ('club-track', 'club', 0.95, 0.8, '{}', ?)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO track_context_fit (
+                track_id, context, score, confidence, evidence_json, updated_at
+            ) VALUES ('sleep-track', 'club', 0.05, 0.8, '{}', ?)
+            """,
+            (now,),
+        )
+        conn.commit()
+
+        response = search_music(conn, "club music", limit=2, explain=True)
+
+        assert response.results[0].track_id == "club-track"
+        assert response.results[0].breakdown["context_score"] > 0.8
+        assert "context fit" in "; ".join(response.results[0].explanation)
+    finally:
+        conn.close()
+
+
 def test_eval_command_reports_search_quality_metrics(tmp_path):
     db_path = tmp_path / "index.sqlite"
     conn = connect_db(db_path)

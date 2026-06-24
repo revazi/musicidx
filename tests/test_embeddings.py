@@ -44,6 +44,36 @@ def test_process_embeddings_stores_profile_vectors_and_skips_current(monkeypatch
         conn.close()
 
 
+def test_process_embeddings_prefers_embedding_text(monkeypatch, tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_profile(
+            conn,
+            "track-1",
+            tmp_path / "a.mp3",
+            "display profile text",
+            embedding_text="semantic optimized text",
+        )
+
+        seen_texts = []
+
+        def fake_embed_texts(texts, *, model_name=DEFAULT_EMBEDDING_MODEL):
+            seen_texts.extend(texts)
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+        monkeypatch.setattr("musicidx.analyzer.embeddings.embed_texts", fake_embed_texts)
+
+        summary = process_embeddings(conn)
+
+        assert summary.updated == 1
+        assert seen_texts == ["semantic optimized text"]
+        row = conn.execute("SELECT text FROM embeddings WHERE track_id = 'track-1'").fetchone()
+        assert row["text"] == "semantic optimized text"
+    finally:
+        conn.close()
+
+
 def test_search_semantic_ranks_by_query_similarity(monkeypatch, tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
@@ -69,7 +99,14 @@ def test_search_semantic_ranks_by_query_similarity(monkeypatch, tmp_path):
         conn.close()
 
 
-def _insert_profile(conn, track_id: str, path, profile_text: str) -> None:
+def _insert_profile(
+    conn,
+    track_id: str,
+    path,
+    profile_text: str,
+    *,
+    embedding_text: str | None = None,
+) -> None:
     path.write_bytes(b"audio")
     conn.execute(
         """
@@ -80,9 +117,10 @@ def _insert_profile(conn, track_id: str, path, profile_text: str) -> None:
     )
     conn.execute(
         """
-        INSERT INTO track_profiles (track_id, profile_text, profile_json, updated_at)
-        VALUES (?, ?, '{}', '2026-01-01T00:00:00+00:00')
+        INSERT INTO track_profiles (
+            track_id, profile_text, embedding_text, profile_json, updated_at
+        ) VALUES (?, ?, ?, '{}', '2026-01-01T00:00:00+00:00')
         """,
-        (track_id, profile_text),
+        (track_id, profile_text, embedding_text),
     )
     conn.commit()

@@ -14,7 +14,9 @@ CORE_TABLES = [
     "library_roots",
     "tracks",
     "audio_features",
+    "track_metadata_claims",
     "track_tags",
+    "track_context_fit",
     "track_profiles",
     "tracks_fts",
     "embeddings",
@@ -65,7 +67,10 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
     for version, name, sql in MIGRATIONS:
         if version in applied_versions:
             continue
-        conn.executescript(sql)
+        if callable(sql):
+            sql(conn)
+        else:
+            conn.executescript(sql)
         conn.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
             (version, name, utc_now()),

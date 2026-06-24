@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -22,6 +23,25 @@ MIN_RANKING_TAG_SCORE = 0.20
 MIN_RESULT_SCORE = 0.05
 SEMANTIC_FLOOR = 0.15
 SEMANTIC_CEILING = 0.75
+METADATA_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "background",
+    "for",
+    "give",
+    "me",
+    "music",
+    "please",
+    "recommend",
+    "show",
+    "some",
+    "song",
+    "songs",
+    "track",
+    "tracks",
+    "with",
+}
 
 
 @dataclass(slots=True)
@@ -81,6 +101,7 @@ def search_music(
     )
     track_rows = _select_track_candidates(conn, include_missing=include_missing)
     tags_by_track = _load_tags(conn, include_missing=include_missing)
+    context_by_track = _load_context_fit(conn, include_missing=include_missing)
     fts_scores = _fts_scores(conn, query, include_missing=include_missing)
     semantic_scores, semantic_error = _semantic_scores(
         conn,
@@ -93,6 +114,7 @@ def search_music(
         intent,
         use_semantic=bool(semantic_scores),
         use_feedback=bool(feedback_scores),
+        use_context=bool(context_by_track),
     )
     scored_results: list[SearchResult] = []
     for row in track_rows:
@@ -101,6 +123,7 @@ def search_music(
         breakdown = _score_track(
             row,
             track_tags,
+            context_by_track.get(track_id, {}),
             intent,
             fts_score=fts_scores.get(track_id, 0.0),
             semantic_score=semantic_scores.get(track_id, 0.0),
@@ -149,6 +172,7 @@ def search_music(
         "fts_candidate_count": len(fts_scores),
         "semantic_candidate_count": len(semantic_scores),
         "feedback_candidate_count": len(feedback_scores),
+        "context_candidate_count": len(context_by_track),
         "semantic_error": semantic_error,
         "weights": weights,
         "score_normalization": "relative_to_top_result",
@@ -297,6 +321,33 @@ def _load_tags(
     return output
 
 
+def _load_context_fit(
+    conn: sqlite3.Connection,
+    *,
+    include_missing: bool,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    missing_clause = "" if include_missing else "AND tr.missing_at IS NULL"
+    rows = conn.execute(
+        f"""
+        SELECT cf.track_id, cf.context, cf.score, cf.confidence, cf.evidence_json
+        FROM track_context_fit cf
+        JOIN tracks tr ON tr.id = cf.track_id
+        WHERE 1 = 1
+          {missing_clause}
+        ORDER BY cf.track_id, cf.score DESC
+        """
+    ).fetchall()
+    output: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in rows:
+        output.setdefault(row["track_id"], {})[row["context"]] = {
+            "context": row["context"],
+            "score": float(row["score"] or 0.0),
+            "confidence": float(row["confidence"] or 0.0),
+            "evidence": _parse_json(row["evidence_json"], default={}),
+        }
+    return output
+
+
 def _fts_scores(
     conn: sqlite3.Connection,
     query: str,
@@ -353,6 +404,7 @@ def _semantic_scores(
 def _score_track(
     row: sqlite3.Row,
     track_tags: list[dict[str, Any]],
+    context_fit: dict[str, dict[str, Any]],
     intent: SearchIntent,
     *,
     fts_score: float,
@@ -362,6 +414,7 @@ def _score_track(
 ) -> dict[str, Any]:
     tag_score, matched_tags, avoided_tags = _tag_score(track_tags, intent)
     feature_score, feature_reasons = _feature_score(row, intent)
+    context_score, matched_contexts = _context_score(context_fit, intent)
     metadata_score, metadata_matches = _metadata_score(row, intent)
     text_score = max(fts_score, _profile_term_score(row["profile_text"] or "", intent.query_terms))
 
@@ -369,6 +422,7 @@ def _score_track(
         weights["semantic"] * semantic_score
         + weights["metadata"] * metadata_score
         + weights["tags"] * tag_score
+        + weights.get("context", 0.0) * context_score
         + weights["features"] * feature_score
         + weights["text"] * text_score
         + weights.get("feedback", 0.0) * feedback_score
@@ -380,12 +434,14 @@ def _score_track(
         "tag_score": tag_score,
         "metadata_score": metadata_score,
         "feature_score": feature_score,
+        "context_score": context_score,
         "text_score": text_score,
         "feedback_score": feedback_score,
         "matched_tags": matched_tags,
         "avoided_tags": avoided_tags,
         "metadata_matches": metadata_matches,
         "feature_reasons": feature_reasons,
+        "matched_contexts": matched_contexts,
         "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
         "sort_values": _sort_values(row),
     }
@@ -406,8 +462,78 @@ def _safe_row_float(row: sqlite3.Row, key: str) -> float | None:
     return None if value is None else float(value)
 
 
+def _context_score(
+    context_fit: dict[str, dict[str, Any]],
+    intent: SearchIntent,
+) -> tuple[float, list[dict[str, Any]]]:
+    desired_contexts = _desired_context_fit_names(intent)
+    if not desired_contexts:
+        return 0.0, []
+    matches: list[dict[str, Any]] = []
+    for context in desired_contexts:
+        fit = context_fit.get(context)
+        if not fit:
+            continue
+        score = float(fit.get("score") or 0.0)
+        confidence = float(fit.get("confidence") or 0.0)
+        adjusted = score * (0.65 + 0.35 * confidence)
+        matches.append(
+            {
+                "context": context,
+                "score": round(score, 6),
+                "confidence": round(confidence, 6),
+                "adjusted_score": round(adjusted, 6),
+                "evidence": fit.get("evidence") or {},
+            }
+        )
+    if not matches:
+        return 0.0, []
+    matches.sort(key=lambda item: float(item["adjusted_score"]), reverse=True)
+    top_scores = [float(item["adjusted_score"]) for item in matches[:3]]
+    return max(top_scores), matches[:5]
+
+
+def _desired_context_fit_names(intent: SearchIntent) -> list[str]:
+    mapping = {
+        "bar": ["lounge_bar", "warm_lounge", "background"],
+        "chill": ["background", "lounge_bar", "focus"],
+        "background": ["background", "no_vocals_background"],
+        "cooking": ["cooking", "dinner", "background"],
+        "dinner": ["dinner", "warm_lounge", "lounge_bar", "background"],
+        "focus": ["focus", "background", "no_vocals_background"],
+        "ambient": ["dark_ambient", "background", "focus"],
+        "dark": ["dark_ambient"],
+        "no_vocals_background": ["no_vocals_background", "background", "focus"],
+        "party": ["party", "club"],
+        "workout": ["workout", "club"],
+        "shower": ["party", "club", "driving"],
+        "driving": ["driving", "club"],
+        "sleep": ["background", "dark_ambient"],
+    }
+    desired: list[str] = []
+    for context in intent.contexts:
+        desired.extend(mapping.get(context, [context]))
+    query_text = intent.query.casefold()
+    if "no vocal" in query_text or "without vocal" in query_text or "instrumental" in query_text:
+        desired.extend(["no_vocals_background", "background"])
+    return _unique_strings(desired)
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output
+
+
 def _metadata_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[dict[str, Any]]]:
-    query_terms = set(normalize_tag_terms(intent.query))
+    query_terms = {
+        term for term in normalize_tag_terms(intent.query) if term not in METADATA_STOP_WORDS
+    }
     if not query_terms:
         return 0.0, []
     query_text = " ".join(query_terms)
@@ -487,7 +613,7 @@ def _tag_score(
         if _tag_matches(tag["tag"], prefer):
             positive += contribution
             matched_tags.append(tag)
-        if _tag_matches(tag["tag"], avoid):
+        if _tag_matches_avoid(tag["tag"], avoid):
             negative += contribution
             avoided_tags.append(tag)
 
@@ -504,6 +630,21 @@ def _tag_matches(tag: str, concepts: list[str]) -> bool:
         concept_text = " ".join(concept_terms)
         if concept_terms.issubset(tag_terms) or concept_text in tag_text:
             return True
+    return False
+
+
+def _tag_matches_avoid(tag: str, concepts: list[str]) -> bool:
+    tag_terms = set(normalize_tag_terms(tag))
+    if _is_negated_positive_tag(tag_terms):
+        return False
+    return _tag_matches(tag, concepts)
+
+
+def _is_negated_positive_tag(tag_terms: set[str]) -> bool:
+    if tag_terms.intersection({"not", "no", "without", "low"}):
+        return True
+    if "instrumental" in tag_terms:
+        return True
     return False
 
 
@@ -579,6 +720,15 @@ def _feedback_scores(
     }
 
 
+def _parse_json(value: str | None, *, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
 def _semantic_relevance(cosine_score: float) -> float:
     if cosine_score <= SEMANTIC_FLOOR:
         return 0.0
@@ -628,6 +778,7 @@ def _has_query_evidence(result: SearchResult) -> bool:
     return bool(
         float(breakdown.get("tag_score") or 0.0) > 0.0
         or float(breakdown.get("metadata_score") or 0.0) > 0.0
+        or float(breakdown.get("context_score") or 0.0) > 0.0
         or float(breakdown.get("text_score") or 0.0) > 0.0
         or float(breakdown.get("semantic_score") or 0.0) > 0.0
         or float(breakdown.get("feedback_score") or 0.0) > 0.0
@@ -676,29 +827,46 @@ def _weights(
     *,
     use_semantic: bool,
     use_feedback: bool,
+    use_context: bool,
 ) -> dict[str, float]:
     has_mood_or_feature_intent = bool(intent.contexts or intent.feature_ranges)
     if use_semantic:
         if has_mood_or_feature_intent:
             weights = {
-                "semantic": 0.48,
+                "semantic": 0.42,
                 "metadata": 0.55,
+                "context": 0.26 if use_context else 0.0,
                 "tags": 0.24,
-                "features": 0.20,
+                "features": 0.18,
                 "text": 0.08,
             }
         else:
             weights = {
                 "semantic": 0.52,
                 "metadata": 0.55,
+                "context": 0.0,
                 "tags": 0.22,
                 "features": 0.16,
                 "text": 0.10,
             }
     elif has_mood_or_feature_intent:
-        weights = {"semantic": 0.0, "metadata": 0.55, "tags": 0.40, "features": 0.34, "text": 0.26}
+        weights = {
+            "semantic": 0.0,
+            "metadata": 0.55,
+            "context": 0.32 if use_context else 0.0,
+            "tags": 0.38,
+            "features": 0.34,
+            "text": 0.22,
+        }
     else:
-        weights = {"semantic": 0.0, "metadata": 0.55, "tags": 0.34, "features": 0.18, "text": 0.48}
+        weights = {
+            "semantic": 0.0,
+            "metadata": 0.55,
+            "context": 0.0,
+            "tags": 0.34,
+            "features": 0.18,
+            "text": 0.48,
+        }
     if use_feedback:
         weights["features"] = max(0.0, weights["features"] - 0.04)
         weights["text"] = max(0.0, weights["text"] - 0.03)

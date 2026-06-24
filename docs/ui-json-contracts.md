@@ -143,7 +143,7 @@ Important result fields:
 | `why` | Human-readable explanations when `--explain` is used. |
 | `raw_score` | Raw weighted ranking score used internally for ordering/debugging. |
 | `saved_feedback_rating` | Latest exact-query judgment for this result: `good`, `bad`, `neutral`, or `null`. |
-| `scores` | Compact score components, including semantic, metadata, tags, features, text, and feedback when present. |
+| `scores` | Compact score components, including semantic, metadata, tags, features, context, text, and feedback when present. |
 | `matched_tags` | Top matched ML/local tags. |
 
 ### Evaluation and feedback
