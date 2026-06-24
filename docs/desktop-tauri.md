@@ -84,8 +84,8 @@ The Tauri UI can:
 - mark removed files missing immediately without launching heavy derived-indexing steps
 - handle a previously indexed music folder disappearing by marking its active tracks missing instead of crashing the watcher
 - refresh derived metadata/fingerprints/features/tags/profiles/embeddings when an existing file is modified
-- keep indexing setup and individual scan/metadata/fingerprint/basic/tag/embed actions in Settings
-- show manual and background pipeline progress by step, runtime, counts, and memory diagnostics in a floating progress panel with a Cancel button
+- keep indexing setup and individual scan/metadata/fingerprint/basic/tag/derived/profile/embed actions in Settings
+- show manual and background pipeline progress by step, runtime, counts, derived tag/context counts, profile schema version, and memory diagnostics in a floating progress panel with a Cancel button
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
 - choose a manual indexing type: Full-track chunked or Full-track larger chunks
 - choose separate manual and background indexing resource profiles: auto, low, balanced, or full; auto scales by RAM and may resolve to internal low/balanced/high/full tiers

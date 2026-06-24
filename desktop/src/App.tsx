@@ -138,6 +138,9 @@ type IndexCommandPayload = {
   root_missing?: boolean;
   batches?: number;
   batch_size?: number;
+  tags_written?: number;
+  contexts_written?: number;
+  schema_version?: number;
   quick?: boolean;
   chunked?: boolean;
   chunk_sec?: number;
@@ -252,6 +255,16 @@ export default function App() {
         ],
       },
       {
+        id: "derived",
+        label: "Derived tags + context fit",
+        args: () => ["rebuild-derived", "--json"],
+      },
+      {
+        id: "profiles",
+        label: "Rebuild profiles",
+        args: () => ["rebuild-profiles", "--json"],
+      },
+      {
         id: "embed",
         label: "Profile embeddings",
         args: () => {
@@ -325,6 +338,16 @@ export default function App() {
           "auto",
           "--json",
         ],
+      },
+      {
+        id: "derived",
+        label: "Derived tags + context fit",
+        args: () => ["rebuild-derived", "--json"],
+      },
+      {
+        id: "profiles",
+        label: "Rebuild profiles",
+        args: () => ["rebuild-profiles", "--json"],
       },
       {
         id: "embed",
@@ -1777,6 +1800,8 @@ function summarizeIndexStep(step: IndexStep, payload: IndexCommandPayload): Pipe
     formatCount("skipped", payload.skipped),
     formatCount("errors", payload.errors),
     formatCount("batches", payload.batches),
+    formatCount("derived tags", payload.tags_written),
+    formatCount("context scores", payload.contexts_written),
   ].filter(Boolean);
   const runtime = [
     payload.duration_sec !== undefined ? `${payload.duration_sec}s` : null,
@@ -1788,6 +1813,7 @@ function summarizeIndexStep(step: IndexStep, payload: IndexCommandPayload): Pipe
       ? `${payload.quick ? "sample" : "full track"} chunks ${payload.chunk_sec ?? "auto"}s`
       : null,
     payload.batch_size ? `batch ${payload.batch_size}` : null,
+    payload.schema_version ? `profile schema v${payload.schema_version}` : null,
   ].filter(Boolean);
   return {
     id: `${step.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
