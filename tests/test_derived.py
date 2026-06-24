@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 
 from musicidx.db import connect_db, init_db
-from musicidx.derived import DERIVED_TAG_SOURCE, derive_context_fit, rebuild_derived_signals
+from musicidx.derived import (
+    DERIVED_TAG_SOURCE,
+    derive_context_fit,
+    derive_feature_tags,
+    rebuild_derived_signals,
+)
 
 
 def test_derive_context_fit_scores_club_and_background():
@@ -35,6 +40,30 @@ def test_derive_context_fit_scores_club_and_background():
     assert ambient_scores["background"] > 0.80
 
 
+def test_no_vocals_tag_requires_vocal_or_instrumental_evidence():
+    no_vocal_evidence = {
+        "bpm": 90.0,
+        "energy": 0.30,
+        "danceability": 0.30,
+        "aggression": 0.10,
+        "brightness": 0.35,
+        "vocalness": None,
+        "instrumentalness": None,
+    }
+    instrumental_evidence = {**no_vocal_evidence, "instrumentalness": 0.95}
+
+    no_evidence_tags = {tag.tag for tag in derive_feature_tags(no_vocal_evidence)}
+    with_evidence_tags = {tag.tag for tag in derive_feature_tags(instrumental_evidence)}
+    no_evidence_contexts = {fit.context: fit for fit in derive_context_fit(no_vocal_evidence)}
+    with_evidence_contexts = {fit.context: fit for fit in derive_context_fit(instrumental_evidence)}
+
+    assert "no_vocals_background" not in no_evidence_tags
+    assert no_evidence_contexts["no_vocals_background"].score <= 0.45
+    assert no_evidence_contexts["no_vocals_background"].confidence < 0.5
+    assert "no_vocals_background" in with_evidence_tags
+    assert with_evidence_contexts["no_vocals_background"].score > 0.75
+
+
 def test_rebuild_derived_writes_tags_context_and_profile(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
@@ -48,6 +77,7 @@ def test_rebuild_derived_writes_tags_context_and_profile(tmp_path):
             danceability=0.88,
             aggression=0.22,
             brightness=0.50,
+            instrumentalness=0.9,
         )
         conn.commit()
 
@@ -112,12 +142,14 @@ def _insert_features(
     danceability: float,
     aggression: float,
     brightness: float,
+    instrumentalness: float | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO audio_features (
-            track_id, bpm, energy, danceability, aggression, brightness, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00+00:00')
+            track_id, bpm, energy, danceability, aggression, brightness,
+            instrumentalness, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00+00:00')
         """,
-        (track_id, bpm, energy, danceability, aggression, brightness),
+        (track_id, bpm, energy, danceability, aggression, brightness, instrumentalness),
     )

@@ -569,6 +569,38 @@ def test_context_fit_boosts_context_queries(tmp_path):
         conn.close()
 
 
+def test_generic_derived_tags_are_not_repeated_in_explanations(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "background-track",
+            tmp_path / "background.mp3",
+            title="Background Tool",
+            artist="Artist A",
+            profile_text="soft background",
+            tags=[
+                ("derived:features", "background_friendly", 1.0),
+                ("derived:features", "low_aggression", 0.95),
+            ],
+            energy=0.30,
+            aggression=0.10,
+            danceability=0.30,
+            bpm=90.0,
+        )
+        conn.commit()
+
+        response = search_music(conn, "background music", limit=1, explain=True)
+
+        matched_tags = response.results[0].breakdown["matched_tags"]
+        assert "background_friendly" not in {tag["tag"] for tag in matched_tags}
+        assert "background_friendly" not in "; ".join(response.results[0].explanation)
+    finally:
+        conn.close()
+
+
 def test_eval_command_reports_search_quality_metrics(tmp_path):
     db_path = tmp_path / "index.sqlite"
     conn = connect_db(db_path)

@@ -96,6 +96,9 @@ def derive_feature_tags(row: sqlite3.Row | dict[str, Any]) -> list[DerivedTag]:
     danceability = _value(row, "danceability")
     aggression = _value(row, "aggression")
     brightness = _value(row, "brightness")
+    vocalness = _value(row, "vocalness")
+    instrumentalness = _value(row, "instrumentalness")
+    has_vocal_evidence = vocalness is not None or instrumentalness is not None
     contexts = {fit.context: fit.score for fit in derive_context_fit(row)}
 
     tags: list[DerivedTag] = []
@@ -113,15 +116,21 @@ def derive_feature_tags(row: sqlite3.Row | dict[str, Any]) -> list[DerivedTag]:
     _append(tags, "fast", _min_score(bpm, 125.0, softness=45.0))
     _append(tags, "dance_tempo", _range_score(bpm, 110.0, 132.0, softness=35.0))
 
-    for context, tag in [
-        ("background", "background_friendly"),
-        ("lounge_bar", "lounge_friendly"),
-        ("warm_lounge", "warm_lounge"),
-        ("club", "club_friendly"),
-        ("focus", "focus_friendly"),
-        ("no_vocals_background", "no_vocals_background"),
+    for context, tag, threshold in [
+        ("background", "background_friendly", 0.85),
+        ("lounge_bar", "lounge_friendly", 0.70),
+        ("warm_lounge", "warm_lounge", 0.70),
+        ("club", "club_friendly", 0.70),
+        ("focus", "focus_friendly", 0.85),
     ]:
-        _append(tags, tag, contexts.get(context, 0.0), threshold=0.70)
+        _append(tags, tag, contexts.get(context, 0.0), threshold=threshold)
+    if has_vocal_evidence:
+        _append(
+            tags,
+            "no_vocals_background",
+            contexts.get("no_vocals_background", 0.0),
+            threshold=0.78,
+        )
 
     return sorted(tags, key=lambda item: (item.score, item.tag), reverse=True)
 
@@ -152,22 +161,25 @@ def derive_context_fit(row: sqlite3.Row | dict[str, Any]) -> list[ContextFit]:
     mid_tempo = _range_score(bpm, 80.0, 124.0, softness=45.0)
     fast_tempo = _min_score(bpm, 125.0, softness=45.0)
     driving_tempo = _range_score(bpm, 85.0, 150.0, softness=45.0)
-    low_vocal = _max_score(vocalness, 0.20, softness=0.35) if vocalness is not None else 0.55
+    has_vocal_evidence = vocalness is not None or instrumentalness is not None
+    low_vocal = _max_score(vocalness, 0.20, softness=0.30) if vocalness is not None else 0.0
     instrumental = (
-        _min_score(instrumentalness, 0.70, softness=0.35)
+        _min_score(instrumentalness, 0.70, softness=0.30)
         if instrumentalness is not None
-        else low_vocal
+        else 0.0
     )
+    vocal_or_instrumental = max(low_vocal, instrumental)
+    no_vocal_prior = vocal_or_instrumental if has_vocal_evidence else 0.35
 
     scores: dict[str, tuple[float, dict[str, float], float]] = {
         "background": _weighted(
             {
                 "low_aggression": low_aggression,
-                "low_mid_energy": low_mid_energy,
-                "balanced_brightness": balanced_brightness,
-                "calm_dance": calm_dance,
+                "background_energy": _range_score(energy, 0.14, 0.52, softness=0.25),
+                "not_too_bright": _max_score(brightness, 0.68, softness=0.30),
+                "not_too_danceable": _max_score(danceability, 0.68, softness=0.35),
             },
-            confidence=0.72,
+            confidence=0.68,
         ),
         "lounge_bar": _weighted(
             {
@@ -212,9 +224,9 @@ def derive_context_fit(row: sqlite3.Row | dict[str, Any]) -> list[ContextFit]:
                 "very_low_aggression": very_low_aggression,
                 "low_mid_energy": low_mid_energy,
                 "calm_dance": calm_dance,
-                "low_vocal_or_instrumental": instrumental,
+                "low_vocal_or_instrumental": no_vocal_prior,
             },
-            confidence=0.64 if vocalness is None and instrumentalness is None else 0.78,
+            confidence=0.56 if not has_vocal_evidence else 0.78,
         ),
         "dark_ambient": _weighted(
             {
@@ -225,14 +237,14 @@ def derive_context_fit(row: sqlite3.Row | dict[str, Any]) -> list[ContextFit]:
             },
             confidence=0.72,
         ),
-        "no_vocals_background": _weighted(
+        "no_vocals_background": _no_vocals_context_score(
             {
-                "low_vocal_or_instrumental": instrumental,
+                "low_vocal_or_instrumental": no_vocal_prior,
                 "low_aggression": low_aggression,
-                "low_mid_energy": low_mid_energy,
+                "background_energy": _range_score(energy, 0.14, 0.52, softness=0.25),
                 "background": low_mid_energy * low_aggression,
             },
-            confidence=0.48 if vocalness is None and instrumentalness is None else 0.82,
+            has_vocal_evidence=has_vocal_evidence,
         ),
         "party": _weighted(
             {
@@ -383,6 +395,21 @@ def _weighted(
     score = sum(parts.values()) / len(parts)
     evidence = {key: round(max(0.0, min(1.0, value)), 6) for key, value in parts.items()}
     return score, evidence, round(max(0.0, min(1.0, confidence)), 6)
+
+
+def _no_vocals_context_score(
+    parts: dict[str, float],
+    *,
+    has_vocal_evidence: bool,
+) -> tuple[float, dict[str, float], float]:
+    score, evidence, confidence = _weighted(
+        parts,
+        confidence=0.82 if has_vocal_evidence else 0.34,
+    )
+    if not has_vocal_evidence:
+        evidence["vocal_evidence_missing"] = 1.0
+        score = min(score, 0.45)
+    return score, evidence, confidence
 
 
 def _append(tags: list[DerivedTag], tag: str, score: float, *, threshold: float = 0.35) -> None:

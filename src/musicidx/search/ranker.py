@@ -23,6 +23,12 @@ MIN_RANKING_TAG_SCORE = 0.20
 MIN_RESULT_SCORE = 0.05
 SEMANTIC_FLOOR = 0.15
 SEMANTIC_CEILING = 0.75
+GENERIC_EXPLANATION_TAGS = {
+    "background_friendly",
+    "focus_friendly",
+    "no_vocals_background",
+}
+
 METADATA_STOP_WORDS = {
     "a",
     "an",
@@ -612,7 +618,8 @@ def _tag_score(
         contribution = (score - MIN_RANKING_TAG_SCORE) / (1.0 - MIN_RANKING_TAG_SCORE)
         if _tag_matches(tag["tag"], prefer):
             positive += contribution
-            matched_tags.append(tag)
+            if _should_explain_matched_tag(tag):
+                matched_tags.append(tag)
         if _tag_matches_avoid(tag["tag"], avoid):
             negative += contribution
             avoided_tags.append(tag)
@@ -631,6 +638,17 @@ def _tag_matches(tag: str, concepts: list[str]) -> bool:
         if concept_terms.issubset(tag_terms) or concept_text in tag_text:
             return True
     return False
+
+
+def _should_explain_matched_tag(tag: dict[str, Any]) -> bool:
+    tag_name = str(tag.get("tag") or "")
+    source = str(tag.get("source") or "")
+    score = float(tag.get("score") or 0.0)
+    if source == "derived:features" and tag_name in GENERIC_EXPLANATION_TAGS:
+        return False
+    if source == "derived:features" and tag_name.endswith("_friendly") and score < 0.85:
+        return False
+    return True
 
 
 def _tag_matches_avoid(tag: str, concepts: list[str]) -> bool:
@@ -660,12 +678,48 @@ def _feature_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[
         softness = 30.0 if field_name == "tempo_bpm" else 0.20
         score = range_score(value, feature_range.low, feature_range.high, softness=softness)
         scores.append(score)
-        if value is not None:
-            reasons.append(
-                f"{field_name} {float(value):.2f} scored {score:.2f} "
-                f"for range [{feature_range.low:.2f}, {feature_range.high:.2f}]"
-            )
+        if value is not None and _should_explain_feature(field_name, feature_range, score):
+            reasons.append(_feature_reason(field_name, float(value), feature_range, score))
     return sum(scores) / len(scores), reasons
+
+
+def _should_explain_feature(field_name: str, feature_range: Any, score: float) -> bool:
+    width = float(feature_range.high) - float(feature_range.low)
+    broad_width = 80.0 if field_name == "tempo_bpm" else 0.55
+    if width >= broad_width and score >= 0.95:
+        return False
+    return score >= 0.25
+
+
+def _feature_reason(field_name: str, value: float, feature_range: Any, score: float) -> str:
+    labels = {
+        "tempo_bpm": "BPM",
+        "energy": "energy",
+        "danceability": "danceability",
+        "aggression": "aggression",
+        "brightness": "brightness",
+    }
+    target = _feature_target_label(str(feature_range.source))
+    label = labels.get(field_name, field_name)
+    if field_name == "tempo_bpm":
+        value_text = f"{value:.0f}"
+    else:
+        value_text = f"{value:.2f}"
+    if score >= 0.75:
+        return f"{label} {value_text} fits {target} target"
+    return f"{label} {value_text} partially fits {target} target ({score:.2f})"
+
+
+def _feature_target_label(source: str) -> str:
+    for prefix in ["library_percentile:", "fallback:"]:
+        source = source.replace(prefix, "")
+    source = source.replace("union:", "").replace("+", "/")
+    parts: list[str] = []
+    for part in source.split("/"):
+        cleaned = part.strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return "/".join(parts).replace("_", " ") or "requested"
 
 
 def range_score(value: Any, low: float, high: float, *, softness: float = 0.15) -> float:
