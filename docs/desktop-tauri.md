@@ -73,7 +73,7 @@ The Tauri UI can:
 - run `doctor --json`
 - use a minimal React + Tailwind + local shadcn-style component UI with subtle purple accents
 - support System, Dark, and Light themes from Settings; System follows OS preference
-- show DB info from advanced indexing actions
+- show DB info and index-health readiness from advanced indexing actions
 - use a separate settings page opened from the header gear icon
 - keep semantic/embedding model configuration on the settings page
 - choose a working directory with a native directory picker
@@ -86,6 +86,7 @@ The Tauri UI can:
 - refresh derived metadata/fingerprints/features/tags/profiles/embeddings when an existing file is modified
 - keep indexing setup and individual scan/metadata/fingerprint/basic/tag/derived/profile/embed actions in Settings
 - show manual and background pipeline progress by step, runtime, counts, derived tag/context counts, profile schema version, and memory diagnostics in a floating progress panel with a Cancel button
+- show an Index health card in Settings with coverage for audio features, derived tags, context-fit scores, profile v2, and embedding freshness
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
 - choose a manual indexing type: Full-track chunked or Full-track larger chunks
 - choose separate manual and background indexing resource profiles: auto, low, balanced, or full; auto scales by RAM and may resolve to internal low/balanced/high/full tiers

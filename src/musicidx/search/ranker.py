@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
+import urllib.parse
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from musicidx.analyzer.embeddings import EmbeddingError, search_semantic
@@ -21,6 +24,7 @@ from musicidx.search.intent import (
 
 MIN_RANKING_TAG_SCORE = 0.20
 MIN_RESULT_SCORE = 0.05
+WEAK_TOP_RESULT_SCORE = 0.12
 SEMANTIC_FLOOR = 0.15
 SEMANTIC_CEILING = 0.75
 GENERIC_EXPLANATION_TAGS = {
@@ -32,10 +36,15 @@ GENERIC_EXPLANATION_TAGS = {
 METADATA_STOP_WORDS = {
     "a",
     "an",
+    "am",
     "and",
     "background",
     "for",
     "give",
+    "i",
+    "im",
+    "in",
+    "m",
     "me",
     "music",
     "please",
@@ -161,13 +170,15 @@ def search_music(
     )
     filtered = _filter_weak_results(ranked, intent)
     sorted_results = _apply_explicit_sort(filtered, intent)
-    diversified = sorted_results if intent.sort_by else _apply_diversity(sorted_results, intent)
+    deduplicated = _suppress_near_duplicates(sorted_results)
+    diversified = deduplicated if intent.sort_by else _apply_diversity(deduplicated, intent)
     limited_results = _with_saved_feedback(
         conn,
         diversified[: intent.limit],
         query=query,
     )
     display_results = _with_display_scores(limited_results)
+    top_raw_score = _top_raw_score(limited_results)
     diagnostics = {
         "candidate_count": len(track_rows),
         "scored_candidate_count": len(scored_results),
@@ -181,8 +192,12 @@ def search_music(
         "context_candidate_count": len(context_by_track),
         "semantic_error": semantic_error,
         "weights": weights,
-        "score_normalization": "relative_to_top_result",
-        "top_raw_score": _top_raw_score(limited_results),
+        "score_normalization": "none",
+        "score_calibration": "weighted_components_divided_by_active_weight_budget",
+        "top_raw_score": top_raw_score,
+        "weak_top_result_score": WEAK_TOP_RESULT_SCORE,
+        "score_warnings": _score_warnings(top_raw_score, limited_results),
+        "duplicate_suppressed_count": max(0, len(sorted_results) - len(deduplicated)),
     }
     return SearchResponse(
         query=query,
@@ -227,20 +242,14 @@ def _with_saved_feedback(
 
 
 def _with_display_scores(results: list[SearchResult]) -> list[SearchResult]:
-    if not results:
-        return []
-    top_score = _top_raw_score(results)
-    if top_score <= 0:
-        return results
-
+    """Attach score annotations without re-scaling the externally visible score."""
     output: list[SearchResult] = []
     for result in results:
         raw_score = _raw_score(result)
-        display_score = max(0.0, min(1.0, raw_score / top_score))
         breakdown = dict(result.breakdown)
         breakdown["raw_score"] = raw_score
-        breakdown["display_score"] = display_score
-        breakdown["score_normalization"] = "relative_to_top_result"
+        breakdown["display_score"] = raw_score
+        breakdown["score_normalization"] = "none"
         output.append(
             SearchResult(
                 track_id=result.track_id,
@@ -249,7 +258,7 @@ def _with_display_scores(results: list[SearchResult]) -> list[SearchResult]:
                 artist=result.artist,
                 album=result.album,
                 genre=result.genre,
-                score=round(display_score, 6),
+                score=round(raw_score, 6),
                 breakdown=breakdown,
                 explanation=result.explanation,
             )
@@ -265,6 +274,66 @@ def _top_raw_score(results: list[SearchResult]) -> float:
 
 def _raw_score(result: SearchResult) -> float:
     return float(result.breakdown.get("final_score", result.score) or 0.0)
+
+
+def _score_warnings(top_raw_score: float, results: list[SearchResult]) -> list[str]:
+    warnings: list[str] = []
+    if results and top_raw_score < WEAK_TOP_RESULT_SCORE:
+        warnings.append("weak_top_score")
+    if results and all(
+        result.breakdown.get("evidence", {}).get("semantic_only") for result in results
+    ):
+        warnings.append("semantic_only_results")
+    return warnings
+
+
+def _suppress_near_duplicates(results: list[SearchResult]) -> list[SearchResult]:
+    seen: set[str] = set()
+    output: list[SearchResult] = []
+    for result in results:
+        keys = _duplicate_keys(result)
+        if keys and any(key in seen for key in keys):
+            continue
+        seen.update(keys)
+        output.append(result)
+    return output
+
+
+def _duplicate_keys(result: SearchResult) -> list[str]:
+    identity = result.breakdown.get("identity") or {}
+    keys: list[str] = []
+    content_hash = str(identity.get("content_hash") or "").strip()
+    if content_hash:
+        keys.append(f"content:{content_hash}")
+    chromaprint = str(identity.get("chromaprint") or "").strip()
+    if chromaprint:
+        keys.append(f"chromaprint:{chromaprint}")
+    artist_title_norm = str(identity.get("artist_title_norm") or "").strip()
+    if artist_title_norm:
+        keys.append(f"artist_title:{artist_title_norm}")
+
+    artist = _normalize_identity_text(result.artist or "")
+    title = _normalize_identity_text(result.title or "")
+    if artist and title:
+        keys.append(f"metadata:{artist}|{title}")
+
+    stem = _normalize_identity_text(Path(urllib.parse.unquote(result.path)).stem)
+    if stem:
+        keys.append(f"path:{stem}")
+    return _unique_strings(keys)
+
+
+def _normalize_identity_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", urllib.parse.unquote(value)).casefold()
+    normalized = normalized.replace("&", " and ")
+    normalized = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", normalized)
+    normalized = re.sub(
+        r"\b(official|video|audio|original|mix|remaster(?:ed)?|extended)\b",
+        " ",
+        normalized,
+    )
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return " ".join(normalized.split())
 
 
 def _select_track_candidates(
@@ -283,6 +352,10 @@ def _select_track_candidates(
             t.album,
             t.album_artist,
             t.genre,
+            t.content_hash,
+            t.chromaprint,
+            t.duration_sec,
+            t.artist_title_norm,
             t.missing_at,
             p.profile_text,
             af.bpm,
@@ -424,7 +497,7 @@ def _score_track(
     metadata_score, metadata_matches = _metadata_score(row, intent)
     text_score = max(fts_score, _profile_term_score(row["profile_text"] or "", intent.query_terms))
 
-    final_score = (
+    weighted_score = (
         weights["semantic"] * semantic_score
         + weights["metadata"] * metadata_score
         + weights["tags"] * tag_score
@@ -433,6 +506,17 @@ def _score_track(
         + weights["text"] * text_score
         + weights.get("feedback", 0.0) * feedback_score
     )
+    final_score = _calibrated_score(weighted_score, weights)
+    evidence = _evidence_summary(
+        semantic_score=semantic_score,
+        metadata_score=metadata_score,
+        tag_score=tag_score,
+        context_score=context_score,
+        feature_score=feature_score,
+        text_score=text_score,
+        feedback_score=feedback_score,
+    )
+    confidence, confidence_warnings = _confidence_label(final_score, evidence)
 
     return {
         "final_score": final_score,
@@ -443,14 +527,93 @@ def _score_track(
         "context_score": context_score,
         "text_score": text_score,
         "feedback_score": feedback_score,
+        "confidence": confidence,
+        "confidence_warnings": confidence_warnings,
+        "evidence": evidence,
         "matched_tags": matched_tags,
         "avoided_tags": avoided_tags,
         "metadata_matches": metadata_matches,
         "feature_reasons": feature_reasons,
         "matched_contexts": matched_contexts,
+        "identity": {
+            "content_hash": row["content_hash"],
+            "chromaprint": row["chromaprint"],
+            "duration_sec": row["duration_sec"],
+            "artist_title_norm": row["artist_title_norm"],
+        },
         "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
         "sort_values": _sort_values(row),
     }
+
+
+def _calibrated_score(weighted_score: float, weights: dict[str, float]) -> float:
+    normalizer = sum(max(0.0, float(value or 0.0)) for value in weights.values())
+    if normalizer <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, weighted_score / normalizer))
+
+
+def _evidence_summary(
+    *,
+    semantic_score: float,
+    metadata_score: float,
+    tag_score: float,
+    context_score: float,
+    feature_score: float,
+    text_score: float,
+    feedback_score: float,
+) -> dict[str, Any]:
+    signals = {
+        "semantic": semantic_score > 0.0,
+        "metadata": metadata_score > 0.0,
+        "tags": tag_score > 0.0,
+        "context": context_score > 0.0,
+        "features": feature_score > 0.0,
+        "text": text_score > 0.0,
+        "feedback": feedback_score != 0.0,
+    }
+    non_semantic_signals = [
+        name for name, present in signals.items() if present and name not in {"semantic"}
+    ]
+    semantic_only = signals["semantic"] and not non_semantic_signals
+    if semantic_only:
+        category = "semantic_only"
+    elif signals["metadata"]:
+        category = "metadata"
+    elif signals["tags"] or signals["context"] or signals["text"]:
+        category = "hybrid"
+    elif signals["features"]:
+        category = "feature_only"
+    elif signals["semantic"]:
+        category = "semantic_plus_weak"
+    else:
+        category = "weak"
+    return {
+        "category": category,
+        "signals": signals,
+        "semantic_only": semantic_only,
+        "non_semantic_signal_count": len(non_semantic_signals),
+    }
+
+
+def _confidence_label(final_score: float, evidence: dict[str, Any]) -> tuple[str, list[str]]:
+    warnings: list[str] = []
+    if evidence.get("semantic_only"):
+        warnings.append("semantic_only")
+    if final_score < WEAK_TOP_RESULT_SCORE:
+        warnings.append("weak_score")
+
+    non_semantic_count = int(evidence.get("non_semantic_signal_count") or 0)
+    category = str(evidence.get("category") or "weak")
+    if final_score >= 0.45 and non_semantic_count >= 2:
+        confidence = "high"
+    elif final_score >= 0.25 and category in {"metadata", "hybrid"}:
+        confidence = "medium"
+    elif final_score >= 0.35 and non_semantic_count >= 1:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    return confidence, warnings
 
 
 def _sort_values(row: sqlite3.Row) -> dict[str, float | None]:
@@ -511,6 +674,7 @@ def _desired_context_fit_names(intent: SearchIntent) -> list[str]:
         "dark": ["dark_ambient"],
         "no_vocals_background": ["no_vocals_background", "background", "focus"],
         "party": ["party", "club"],
+        "wedding": ["party", "dinner", "warm_lounge", "lounge_bar"],
         "workout": ["workout", "club"],
         "shower": ["party", "club", "driving"],
         "driving": ["driving", "club"],
@@ -537,9 +701,7 @@ def _unique_strings(values: list[str]) -> list[str]:
 
 
 def _metadata_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[dict[str, Any]]]:
-    query_terms = {
-        term for term in normalize_tag_terms(intent.query) if term not in METADATA_STOP_WORDS
-    }
+    query_terms = {term for term in intent.query_terms if term not in METADATA_STOP_WORDS}
     if not query_terms:
         return 0.0, []
     query_text = " ".join(query_terms)
@@ -635,7 +797,11 @@ def _tag_matches(tag: str, concepts: list[str]) -> bool:
         if not concept_terms:
             continue
         concept_text = " ".join(concept_terms)
-        if concept_terms.issubset(tag_terms) or concept_text in tag_text:
+        if concept_terms.issubset(tag_terms):
+            return True
+        if any(len(term) < 3 for term in concept_terms):
+            continue
+        if concept_text in tag_text:
             return True
     return False
 
@@ -824,7 +990,7 @@ def _has_subjective_intent(intent: SearchIntent) -> bool:
 
 
 def _allow_feature_backfill(intent: SearchIntent) -> bool:
-    return bool({"party", "workout", "shower"}.intersection(intent.contexts))
+    return bool({"party", "wedding", "workout", "shower"}.intersection(intent.contexts))
 
 
 def _has_query_evidence(result: SearchResult) -> bool:

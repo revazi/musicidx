@@ -142,6 +142,37 @@ CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
         "avoid": ["sleep", "sad", "meditative"],
         "features": {"energy": "high", "danceability": "high", "tempo_bpm": "mid_high"},
     },
+    "wedding": {
+        "keywords": ["wedding", "weddings", "wedding reception", "reception"],
+        "prefer": [
+            "romantic",
+            "love",
+            "happy",
+            "uplifting",
+            "feel good",
+            "warm",
+            "party",
+            "disco",
+            "pop",
+            "soul",
+        ],
+        "avoid": [
+            "aggressive",
+            "hardcore",
+            "hard techno",
+            "dark",
+            "chaotic",
+            "workout",
+            "sleep",
+            "sad",
+        ],
+        "features": {
+            "energy": "mid",
+            "danceability": "mid_high",
+            "aggression": "low",
+            "tempo_bpm": "mid",
+        },
+    },
     "workout": {
         "keywords": ["workout", "gym", "run", "running", "exercise", "training"],
         "prefer": ["energetic", "powerful", "sport", "upbeat", "fast"],
@@ -665,6 +696,7 @@ def normalize_terms(text: str) -> list[str]:
     stop_words = {
         "a",
         "an",
+        "am",
         "and",
         "are",
         "bar",
@@ -672,7 +704,10 @@ def normalize_terms(text: str) -> list[str]:
         "for",
         "give",
         "i",
+        "im",
+        "in",
         "is",
+        "m",
         "me",
         "music",
         "my",
@@ -704,14 +739,34 @@ def match_library_tags(concepts: list[str], tag_stats: dict[str, TagStat]) -> li
         normalized_tag = " ".join(tag_terms)
         for concept in concepts:
             concept_terms = set(normalize_tag_terms(concept))
-            if not concept_terms:
+            if not concept_terms or _is_opposite_polarity_tag(tag_terms, concept_terms):
                 continue
             concept_text = " ".join(concept_terms)
-            if concept_terms.issubset(tag_terms) or concept_text in normalized_tag:
+            if _concept_matches_tag_text(concept_terms, concept_text, tag_terms, normalized_tag):
                 matches.append((tag, stat.count + stat.avg_score))
                 break
     matches.sort(key=lambda item: item[1], reverse=True)
     return _unique([tag for tag, _ in matches])
+
+
+def _concept_matches_tag_text(
+    concept_terms: set[str],
+    concept_text: str,
+    tag_terms: set[str],
+    normalized_tag: str,
+) -> bool:
+    if concept_terms.issubset(tag_terms):
+        return True
+    if any(len(term) < 3 for term in concept_terms):
+        return False
+    return concept_text in normalized_tag
+
+
+def _is_opposite_polarity_tag(tag_terms: set[str], concept_terms: set[str]) -> bool:
+    polarity_terms = {"low", "not", "no", "without"}
+    return bool(tag_terms.intersection(polarity_terms)) and not bool(
+        concept_terms.intersection(polarity_terms)
+    )
 
 
 def normalize_tag_terms(value: str) -> list[str]:

@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
+  AlertTriangle,
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
@@ -77,18 +78,86 @@ type SearchResult = {
   album?: string | null;
   genre?: string | null;
   score?: number;
+  raw_score?: number;
+  confidence?: "high" | "medium" | "low" | string | null;
+  warnings?: string[];
   why?: string[];
   scores?: Record<string, number>;
   matched_tags?: Array<{ tag: string; score: number; source: string }>;
   saved_feedback_rating?: "good" | "bad" | "neutral" | null;
 };
 
+type SearchFeatureRange = {
+  low?: number;
+  high?: number;
+  source?: string;
+};
+
+type SearchSortSpec = {
+  field?: string;
+  direction?: string;
+  source?: string;
+};
+
+type SearchIntentSummary = {
+  limit?: number;
+  contexts?: string[];
+  prefer_tags?: string[];
+  avoid_tags?: string[];
+  feature_ranges?: Record<string, SearchFeatureRange>;
+  sort_by?: SearchSortSpec[];
+  semantic_model?: string | null;
+  use_semantic?: boolean;
+};
+
 type SearchPayload = {
   query?: string;
   parser?: string;
   llm_error?: string | null;
+  intent?: SearchIntentSummary;
   diagnostics?: Record<string, unknown>;
   results?: SearchResult[];
+};
+
+type HealthWarning = {
+  code: string;
+  severity: "error" | "warning" | string;
+  message: string;
+};
+
+type HealthCoverage = {
+  count?: number;
+  tracks?: number;
+  coverage?: number;
+  missing?: number;
+};
+
+type IndexHealthPayload = {
+  ready: boolean;
+  db_path: string;
+  models_path: string;
+  semantic_model: string;
+  tracks: {
+    total: number;
+    active: number;
+    missing: number;
+    failed: number;
+    quarantined: number;
+  };
+  audio_features: HealthCoverage;
+  derived_tags: HealthCoverage;
+  context_fit: HealthCoverage;
+  profiles: HealthCoverage & {
+    schema_v2?: number;
+    with_embedding_text?: number;
+  };
+  embeddings: HealthCoverage & {
+    current?: number;
+    stale?: number;
+    selected_model?: string | null;
+  };
+  warnings: HealthWarning[];
+  recommended_actions: string[];
 };
 
 type ThemeMode = "system" | "light" | "dark";
@@ -196,6 +265,7 @@ export default function App() {
   const [statusError, setStatusError] = useState(false);
   const [rawOutput, setRawOutput] = useState("Ready.");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [lastSearchPayload, setLastSearchPayload] = useState<SearchPayload | null>(null);
   const [playerTrack, setPlayerTrack] = useState<SearchResult | null>(null);
   const [playerSrc, setPlayerSrc] = useState("");
   const [playerError, setPlayerError] = useState("");
@@ -208,6 +278,8 @@ export default function App() {
   const [pipelineSummaries, setPipelineSummaries] = useState<PipelineSummary[]>([]);
   const [backgroundStatus, setBackgroundStatus] = useState("Background watcher idle");
   const [settingsSaveStatus, setSettingsSaveStatus] = useState("");
+  const [indexHealth, setIndexHealth] = useState<IndexHealthPayload | null>(null);
+  const [indexHealthLoading, setIndexHealthLoading] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const currentRequestIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -378,6 +450,7 @@ export default function App() {
   );
   const backgroundIndexIntervalMs = backgroundIndexIntervalMinutes * 60 * 1000;
   const backgroundIndexIntervalLabel = formatMinutes(backgroundIndexIntervalMinutes);
+  const settingsPathWarnings = settingsHealthWarnings(settings);
 
   useEffect(() => {
     void initializeDesktopState();
@@ -648,6 +721,7 @@ export default function App() {
     appendCommonSearchArgs(args);
     const payload = await runJsonCommand<SearchPayload>(args);
     setResults(payload.results ?? []);
+    setLastSearchPayload(payload);
     writeRaw({
       summary: {
         query: payload.query,
@@ -670,6 +744,22 @@ export default function App() {
     const args = ["eval", "eval/search_queries.json", "--limit", String(normalizedLimit()), "--json"];
     appendCommonSearchArgs(args);
     await runJsonCommand(args);
+  }
+
+  async function checkIndexHealth() {
+    const args = ["index-health", "--json"];
+    if (settings.semanticModel.trim()) {
+      args.push("--semantic-model", settings.semanticModel.trim());
+    }
+    setIndexHealthLoading(true);
+    try {
+      const payload = await runJsonCommand<IndexHealthPayload>(args);
+      setIndexHealth(payload);
+      const hasError = payload.warnings.some((warning) => warning.severity === "error");
+      updateStatus(payload.ready ? "Index health ready" : "Index health needs attention", hasError);
+    } finally {
+      setIndexHealthLoading(false);
+    }
   }
 
   async function pruneAllMissing() {
@@ -1023,6 +1113,46 @@ export default function App() {
               <div className="rounded-lg border bg-muted/50 p-3 text-sm text-muted-foreground">
                 {backgroundStatus}
               </div>
+              <div className="space-y-3 rounded-lg border bg-background/60 p-3 text-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h4 className="font-medium">Index health</h4>
+                    <p className="text-muted-foreground">
+                      Check DB readiness, profile schema, context-fit coverage, and embedding freshness.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge
+                      variant={
+                        indexHealth
+                          ? indexHealth.ready
+                            ? "default"
+                            : indexHealth.warnings.some((warning) => warning.severity === "error")
+                              ? "destructive"
+                              : "secondary"
+                          : "secondary"
+                      }
+                    >
+                      {indexHealth ? (indexHealth.ready ? "Ready" : "Needs attention") : "Not checked"}
+                    </Badge>
+                    <Button variant="outline" size="sm" disabled={busy || indexHealthLoading} onClick={checkIndexHealth}>
+                      {indexHealthLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
+                      Check index health
+                    </Button>
+                  </div>
+                </div>
+                {settingsPathWarnings.length > 0 ? (
+                  <div className="grid gap-1 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-destructive">
+                    {settingsPathWarnings.map((warning) => (
+                      <p key={warning} className="flex gap-2">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>{warning}</span>
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+                {indexHealth ? <IndexHealthCard health={indexHealth} /> : null}
+              </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-muted-foreground">{pipelineStep}</span>
@@ -1061,6 +1191,10 @@ export default function App() {
                   <Button variant="outline" disabled={busy} onClick={runEval}>
                     <ListChecks className="h-4 w-4" />
                     Run eval
+                  </Button>
+                  <Button variant="outline" disabled={busy || indexHealthLoading} onClick={checkIndexHealth}>
+                    <Activity className="h-4 w-4" />
+                    Index health
                   </Button>
                   <Button variant="outline" disabled={busy} onClick={() => runJsonCommand(["db-info", "--json"])}>
                     <Database className="h-4 w-4" />
@@ -1318,6 +1452,7 @@ export default function App() {
                 Parse intent
               </Button>
             </div>
+            {lastSearchPayload ? <SearchParametersPanel payload={lastSearchPayload} /> : null}
             <div className="rounded-lg border bg-muted/50 px-3 py-2 text-xs text-muted-foreground wrap-anywhere">
               {backgroundStatus}
             </div>
@@ -1555,6 +1690,159 @@ function Shell({
   );
 }
 
+function SearchParametersPanel({ payload }: { payload: SearchPayload }) {
+  const intent = payload.intent ?? {};
+  const diagnostics = payload.diagnostics ?? {};
+  const featureEntries = Object.entries(intent.feature_ranges ?? {});
+  const sortSpecs = intent.sort_by ?? [];
+  const weights = recordValue(diagnostics.weights);
+  const scoreWarnings = stringList(diagnostics.score_warnings);
+  const llmUsed = Boolean(payload.parser && payload.parser !== "dynamic");
+  return (
+    <div className="grid gap-3 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Search parameters used</span>
+        <Badge variant="secondary">parser: {payload.parser || "dynamic"}</Badge>
+        <Badge variant={payload.llm_error ? "destructive" : "secondary"}>
+          {payload.llm_error ? "LLM fallback" : llmUsed ? "LLM hints" : "local parser"}
+        </Badge>
+        <Badge variant="secondary">limit: {intent.limit ?? "auto"}</Badge>
+        <Badge variant="secondary">
+          {intent.use_semantic ? "semantic search on" : "semantic search off"}
+        </Badge>
+        <Badge variant="outline">raw calibrated scores</Badge>
+      </div>
+
+      {payload.llm_error ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-destructive">
+          LLM failed; search used local dynamic intent. {payload.llm_error.split("\n")[0]}
+        </div>
+      ) : null}
+
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        <SearchParamBlock label="Query" value={payload.query || "—"} />
+        <SearchParamBlock label="Semantic model" value={intent.semantic_model || "not indexed/disabled"} />
+        <SearchParamBlock label="Contexts" value={chipList(intent.contexts)} />
+        <SearchParamBlock label="Prefer tags" value={chipList(intent.prefer_tags, 12)} />
+        <SearchParamBlock label="Avoid tags" value={chipList(intent.avoid_tags, 10)} />
+        <SearchParamBlock
+          label="Feature ranges"
+          value={featureEntries.length ? featureEntries.map(formatFeatureRange).join(" · ") : "none"}
+        />
+        <SearchParamBlock
+          label="Sort"
+          value={sortSpecs.length ? sortSpecs.map(formatSortSpec).join(" · ") : "none"}
+        />
+        <SearchParamBlock
+          label="Score calibration"
+          value={String(diagnostics.score_calibration || diagnostics.score_normalization || "raw")}
+        />
+        <SearchParamBlock
+          label="Diagnostics"
+          value={[
+            metricText("top", diagnostics.top_raw_score),
+            metricText("filtered", diagnostics.filtered_candidate_count),
+            metricText("deduped", diagnostics.duplicate_suppressed_count),
+            scoreWarnings.length ? `warnings ${scoreWarnings.join(", ")}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        />
+      </div>
+
+      {Object.keys(weights).length > 0 ? (
+        <details className="rounded-md border bg-background/50 p-2">
+          <summary className="cursor-pointer font-medium text-foreground">Ranking weights</summary>
+          <p className="mt-2 wrap-anywhere">{formatWeights(weights)}</p>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function SearchParamBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-md bg-background/50 p-2">
+      <p className="font-medium text-foreground">{label}</p>
+      <p className="wrap-anywhere">{value || "—"}</p>
+    </div>
+  );
+}
+
+function IndexHealthCard({ health }: { health: IndexHealthPayload }) {
+  const active = health.tracks.active ?? 0;
+  const hasWarnings = health.warnings.length > 0;
+  return (
+    <div className="grid gap-3">
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <HealthMetric label="Active tracks" value={`${active}`} detail={`${health.tracks.total ?? 0} total`} />
+        <HealthMetric label="Audio features" value={coverageText(health.audio_features, active)} />
+        <HealthMetric label="Profiles v2" value={`${health.profiles.schema_v2 ?? 0}/${active}`} />
+        <HealthMetric label="Embeddings" value={`${health.embeddings.current ?? 0}/${active} current`} />
+        <HealthMetric label="Derived tags" value={coverageText(health.derived_tags, active)} />
+        <HealthMetric label="Context scores" value={coverageText(health.context_fit, active)} />
+        <HealthMetric label="Failed" value={`${health.tracks.failed ?? 0}`} />
+        <HealthMetric label="Quarantined" value={`${health.tracks.quarantined ?? 0}`} />
+      </div>
+      <div className="min-w-0 rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
+        <p className="wrap-anywhere">DB: {health.db_path}</p>
+        <p className="wrap-anywhere">Models: {health.models_path}</p>
+        <p className="wrap-anywhere">
+          Semantic model: {health.embeddings.selected_model || health.semantic_model}
+        </p>
+      </div>
+      {hasWarnings ? (
+        <div className="grid gap-2">
+          {health.warnings.map((warning) => (
+            <div
+              key={warning.code}
+              className={cn(
+                "flex gap-2 rounded-md border p-2 text-xs",
+                warning.severity === "error"
+                  ? "border-destructive/40 bg-destructive/10 text-destructive"
+                  : "bg-muted/50 text-muted-foreground",
+              )}
+            >
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                <span className="font-medium">{warning.code}</span>: {warning.message}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="flex gap-2 rounded-md border bg-muted/50 p-2 text-xs text-muted-foreground">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+          Index is ready for search.
+        </p>
+      )}
+      {health.recommended_actions.length > 0 ? (
+        <div className="grid gap-1 rounded-md border bg-muted/50 p-2 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground">Recommended actions</p>
+          {health.recommended_actions.map((action) => (
+            <p key={action}>• {action}</p>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function HealthMetric({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-md border bg-muted/40 p-2">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="font-medium">{value}</p>
+      {detail ? <p className="text-xs text-muted-foreground">{detail}</p> : null}
+    </div>
+  );
+}
+
+function coverageText(coverage: HealthCoverage, activeTracks: number): string {
+  const tracks = coverage.tracks ?? 0;
+  return `${tracks}/${activeTracks}`;
+}
+
 function Field({
   label,
   children,
@@ -1703,7 +1991,14 @@ function ResultCard({
           </h3>
           <p className="wrap-anywhere text-sm text-muted-foreground">{meta || "Unknown artist/album"}</p>
         </div>
-        <Badge variant="secondary">{(result.score ?? 0).toFixed(3)}</Badge>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <Badge variant="secondary">{(result.score ?? 0).toFixed(3)}</Badge>
+          {result.confidence ? (
+            <Badge variant={result.confidence === "low" ? "outline" : "secondary"}>
+              {result.confidence} confidence
+            </Badge>
+          ) : null}
+        </div>
       </div>
       <div
         className={cn(
@@ -1853,6 +2148,79 @@ function describeScanChanges(payload: IndexCommandPayload): string {
 
 function formatClock(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function chipList(values: string[] | undefined, max = 8): string {
+  if (!values || values.length === 0) {
+    return "none";
+  }
+  const shown = values.slice(0, max);
+  const suffix = values.length > max ? ` +${values.length - max} more` : "";
+  return `${shown.join(", ")}${suffix}`;
+}
+
+function formatFeatureRange([field, range]: [string, SearchFeatureRange]): string {
+  const low = numericText(range.low);
+  const high = numericText(range.high);
+  const source = range.source ? ` ${range.source.replaceAll("_", " ")}` : "";
+  return `${field.replaceAll("_", " ")} ${low}–${high}${source}`;
+}
+
+function formatSortSpec(spec: SearchSortSpec): string {
+  const field = (spec.field || "unknown").replaceAll("_", " ");
+  const direction = spec.direction === "asc" ? "lowest first" : "highest first";
+  return `${field} ${direction}`;
+}
+
+function formatWeights(weights: Record<string, unknown>): string {
+  return Object.entries(weights)
+    .map(([key, value]) => `${key} ${numericText(value)}`)
+    .join(" · ");
+}
+
+function metricText(label: string, value: unknown): string | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  return `${label} ${numericText(value)}`;
+}
+
+function numericText(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toFixed(Math.abs(value) >= 10 ? 0 : 3).replace(/\.0+$/, "");
+  }
+  return String(value ?? "—");
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function settingsHealthWarnings(settings: SettingsState): string[] {
+  const warnings: string[] = [];
+  const dbPath = normalizePathForWarning(settings.dbPath);
+  const modelsPath = normalizePathForWarning(settings.modelsPath);
+  if (dbPath && modelsPath && dbPath.startsWith(`${modelsPath}/`)) {
+    warnings.push("DB path is inside the models folder. Use a separate musicidx.sqlite path.");
+  }
+  if (modelsPath.includes("desktop/src-tauri/target/debug/resources/models")) {
+    warnings.push("Models path points to Tauri debug resources. Use the repo .musicidx-models folder in dev.");
+  }
+  return warnings;
+}
+
+function normalizePathForWarning(value: string): string {
+  return value.trim().replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
 function envOverrides(settings: SettingsState): Record<string, string> {

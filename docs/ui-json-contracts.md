@@ -120,7 +120,7 @@ musicidx search "chill bar" --format json --concise --limit 10 --explain
 
 Important top-level fields:
 
-Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, and `sort_by`.
+Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `sort_by`, `score_warnings`, and `duplicate_suppressed_count`.
 
 | Field | Meaning |
 | --- | --- |
@@ -129,7 +129,7 @@ Local non-LLM ranking now filters weak fallback candidates when there are no mea
 | `parser` | Parser mode, for example `dynamic` or `dynamic+gemini`. |
 | `llm_error` | LLM failure message when `--llm` fallback occurred. |
 | `intent` | Compact parsed intent. |
-| `diagnostics` | Candidate counts, ranking weights, semantic errors, and score normalization. |
+| `diagnostics` | Candidate counts, ranking weights, semantic errors, score calibration, weak-score warnings, and duplicate suppression counts. |
 | `results` | Ranked result list. |
 
 Important result fields:
@@ -139,9 +139,11 @@ Important result fields:
 | `track_id` | Stable local track ID. |
 | `path` | Local file path. |
 | `title` / `artist` / `album` / `genre` | Display metadata when available. |
-| `score` | User-facing relevance score normalized to the top returned result (`1.0` is best for that query). |
-| `why` | Human-readable explanations when `--explain` is used. |
-| `raw_score` | Raw weighted ranking score used internally for ordering/debugging. |
+| `score` | Calibrated raw relevance score in approximately `0..1`; it is not normalized to the top returned result. |
+| `raw_score` | Same calibrated score, exposed explicitly for clients/debugging. |
+| `confidence` | `high`, `medium`, or `low` based on score strength and evidence type. |
+| `warnings` | Per-result warnings such as `semantic_only` or `weak_score`. |
+| `why` | Human-readable explanations when `--explain` is used, including semantic-only/low-confidence notes. |
 | `saved_feedback_rating` | Latest exact-query judgment for this result: `good`, `bad`, `neutral`, or `null`. |
 | `scores` | Compact score components, including semantic, metadata, tags, features, context, text, and feedback when present. |
 | `matched_tags` | Top matched ML/local tags. |

@@ -265,6 +265,12 @@ infer a broad default listening intent depending on the tone, feeling and mood e
 Do not return empty hints unless the user explicitly asks not to search.
 
 Prefer tag concepts that exist or are semantically close to the provided library tags.
+
+For event/occasion queries, translate the occasion into listening attributes rather than
+matching the literal event word only. For "wedding", prefer romantic, happy, uplifting,
+warm, danceable reception music with low aggression; include the wedding context when
+allowed, and avoid dark, hard, aggressive, or workout-like music unless the user explicitly
+asks for a club/rave/techno wedding.
 """.strip()
 
 

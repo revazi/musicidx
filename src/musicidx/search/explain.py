@@ -10,8 +10,16 @@ def build_explanation(breakdown: dict[str, Any]) -> list[str]:
     lines: list[str] = []
 
     semantic_score = breakdown.get("semantic_score")
+    evidence = breakdown.get("evidence") or {}
+    confidence = breakdown.get("confidence")
+    confidence_warnings = breakdown.get("confidence_warnings") or []
     if semantic_score is not None and semantic_score > 0:
         lines.append(f"semantic profile similarity {semantic_score:.2f}")
+    if evidence.get("semantic_only"):
+        lines.append("semantic-only match; no metadata, tag, context, feature, or text evidence")
+    if confidence == "low" and confidence_warnings:
+        labels = ", ".join(str(item).replace("_", " ") for item in confidence_warnings[:3])
+        lines.append(f"low confidence: {labels}")
 
     metadata_matches = breakdown.get("metadata_matches") or []
     if metadata_matches:

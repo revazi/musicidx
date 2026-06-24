@@ -247,6 +247,7 @@ musicidx doctor
 musicidx resources
 musicidx resources --json
 musicidx db-info
+musicidx index-health --json
 musicidx --help
 ```
 

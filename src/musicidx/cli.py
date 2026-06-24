@@ -55,6 +55,7 @@ from musicidx.db import CORE_TABLES, connect_db, db_info, init_db
 from musicidx.derived import rebuild_derived_signals
 from musicidx.failures import list_failed_tracks, record_track_error, reset_failed_tracks
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
+from musicidx.health import build_index_health
 from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
 from musicidx.missing import list_missing_tracks, prune_missing_tracks
 from musicidx.profiles import rebuild_track_profiles
@@ -681,6 +682,57 @@ def db_info_command(db: DbOption = None, json_output: JsonOption = False) -> Non
         count = payload["tables"].get(table_name)
         table.add_row(table_name, "missing" if count is None else str(count))
     console.print(table)
+
+
+@app.command("index-health")
+def index_health_command(
+    db: DbOption = None,
+    models_path: ModelsPathOption = None,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    json_output: JsonOption = False,
+) -> None:
+    """Check whether the local index is ready for accurate search."""
+    db_path = resolve_db_path(db)
+    resolved_models_path = resolve_models_path(models_path)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        payload = build_index_health(
+            conn,
+            db_path=db_path,
+            models_path=resolved_models_path,
+            semantic_model=semantic_model,
+        )
+    finally:
+        conn.close()
+
+    if json_output:
+        _print_json(payload)
+        return
+
+    status = "Ready" if payload["ready"] else "Needs attention"
+    console.print(f"[bold]Index health:[/bold] {status}")
+    console.print(f"[bold]Database:[/bold] {payload['db_path']}")
+    table = Table(title="Index readiness")
+    table.add_column("Area")
+    table.add_column("Status")
+    tracks = payload["tracks"]
+    table.add_row("Tracks", f"{tracks['active']} active / {tracks['total']} total")
+    table.add_row("Audio features", _coverage_text(payload["audio_features"]))
+    table.add_row("Derived tags", _coverage_text(payload["derived_tags"]))
+    table.add_row("Context fit", _coverage_text(payload["context_fit"]))
+    profiles = payload["profiles"]
+    table.add_row("Profiles", f"{profiles['schema_v2']} schema v2 / {tracks['active']} active")
+    embeddings = payload["embeddings"]
+    table.add_row("Embeddings", f"{embeddings['current']} current / {tracks['active']} active")
+    console.print(table)
+    for warning in payload["warnings"]:
+        color = "red" if warning["severity"] == "error" else "yellow"
+        console.print(f"[{color}]{warning['code']}:[/{color}] {warning['message']}")
+    if payload["recommended_actions"]:
+        console.print("[bold]Recommended actions:[/bold]")
+        for action in payload["recommended_actions"]:
+            console.print(f"- {action}")
 
 
 @app.command("failed")
@@ -2081,6 +2133,9 @@ def _concise_result(result: Any) -> dict[str, Any]:
         "genre": result.genre,
         "score": result.score,
         "raw_score": round(float(breakdown.get("raw_score", result.score)), 6),
+        "confidence": breakdown.get("confidence"),
+        "evidence": breakdown.get("evidence"),
+        "warnings": breakdown.get("confidence_warnings") or [],
         "saved_feedback_rating": _rating_label(breakdown.get("saved_feedback_rating")),
         "why": result.explanation,
         "scores": {
@@ -2101,6 +2156,12 @@ def _concise_result(result: Any) -> dict[str, Any]:
             for tag in (breakdown.get("matched_tags") or [])[:5]
         ],
     }
+
+
+def _coverage_text(payload: dict[str, Any]) -> str:
+    tracks = int(payload.get("tracks", 0) or 0)
+    missing = int(payload.get("missing", 0) or 0)
+    return f"{tracks} / {tracks + missing} active"
 
 
 def _rating_label(value: Any) -> str | None:

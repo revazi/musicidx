@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
+from musicidx.analyzer.embeddings import save_profile_embedding
 from musicidx.cli import _search_payload, app
 from musicidx.db import connect_db, init_db
 from musicidx.search.intent import parse_intent_dynamic
@@ -37,6 +39,69 @@ def test_parse_intent_uses_library_tags_and_feature_ranges(tmp_path):
         assert "relaxing" in intent.prefer_tags
         assert "electronic---ambient" in intent.prefer_tags
         assert "energy" in intent.feature_ranges
+        assert "aggression" in intent.feature_ranges
+    finally:
+        conn.close()
+
+
+def test_parse_intent_ignores_contraction_fragments_for_tag_matching(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "fragment-track",
+            tmp_path / "fragment.mp3",
+            profile_text="midtempo melodic summer lounge",
+            tags=[
+                ("derived:features", "midtempo", 0.9),
+                ("essentia:mood", "melodic", 0.9),
+                ("essentia:mood", "summer", 0.9),
+                ("derived:features", "warm_lounge", 0.9),
+            ],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.60,
+            bpm=110.0,
+        )
+
+        intent = parse_intent_dynamic("I’m in owe", conn)
+
+        assert intent.contexts == []
+        assert intent.query_terms == ["owe"]
+        assert intent.prefer_tags == []
+        assert "midtempo" not in intent.prefer_tags
+        assert "melodic" not in intent.prefer_tags
+        assert "summer" not in intent.prefer_tags
+    finally:
+        conn.close()
+
+
+def test_parse_intent_detects_im_in_love_as_romantic(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "love-track",
+            tmp_path / "love.mp3",
+            profile_text="romantic love song",
+            tags=[
+                ("essentia:mood", "romantic", 0.9),
+                ("essentia:mood", "love", 0.8),
+            ],
+            energy=0.35,
+            aggression=0.10,
+            danceability=0.55,
+            bpm=92.0,
+        )
+
+        intent = parse_intent_dynamic("I'm in love", conn)
+
+        assert intent.contexts == ["romantic"]
+        assert "love" in intent.query_terms
+        assert "romantic" in intent.prefer_tags
+        assert "love" in intent.prefer_tags
         assert "aggression" in intent.feature_ranges
     finally:
         conn.close()
@@ -167,13 +232,14 @@ def test_search_music_prioritizes_explicit_artist_plus_vibe_query(tmp_path):
             "Stephan Bodzin",
         ]
         assert response.results[0].breakdown["metadata_score"] == 1.0
-        assert response.results[0].score == 1.0
+        assert response.results[0].score == round(response.results[0].breakdown["raw_score"], 6)
+        assert response.results[0].score < 1.0
         assert "metadata match" in "; ".join(response.results[0].explanation)
     finally:
         conn.close()
 
 
-def test_search_music_returns_normalized_relevance_score(tmp_path):
+def test_search_music_returns_raw_relevance_score(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
         init_db(conn)
@@ -206,10 +272,13 @@ def test_search_music_returns_normalized_relevance_score(tmp_path):
 
         response = search_music(conn, "chill", explain=True)
 
-        assert response.results[0].score == 1.0
+        assert response.results[0].score == round(response.results[0].breakdown["raw_score"], 6)
         assert response.results[0].breakdown["raw_score"] < 1.0
-        assert response.results[0].breakdown["display_score"] == 1.0
-        assert response.diagnostics["score_normalization"] == "relative_to_top_result"
+        assert (
+            response.results[0].breakdown["display_score"]
+            == response.results[0].breakdown["raw_score"]
+        )
+        assert response.diagnostics["score_normalization"] == "none"
         assert response.diagnostics["top_raw_score"] == response.results[0].breakdown["raw_score"]
         assert (
             response.results[0].breakdown["raw_score"]
@@ -717,6 +786,230 @@ def test_feedback_command_persists_query_aware_feedback(tmp_path):
         conn.close()
 
 
+def test_parse_intent_has_wedding_event_prior(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "wedding-track",
+            tmp_path / "wedding.mp3",
+            profile_text="romantic happy dance reception",
+            tags=[
+                ("essentia:mood", "romantic", 0.8),
+                ("essentia:mood", "happy", 0.8),
+                ("derived:features", "danceable", 0.9),
+            ],
+            energy=0.60,
+            aggression=0.15,
+            danceability=0.82,
+            bpm=116.0,
+        )
+
+        intent = parse_intent_dynamic("wedding", conn)
+
+        assert "wedding" in intent.contexts
+        assert "romantic" in intent.prefer_tag_concepts
+        assert "happy" in intent.prefer_tag_concepts
+        assert "happy" in intent.prefer_tags
+        assert "not_danceable" not in intent.prefer_tags
+        assert "dark" in intent.avoid_tag_concepts
+        assert "aggression" in intent.feature_ranges
+    finally:
+        conn.close()
+
+
+def test_search_music_wedding_prefers_reception_friendly_over_hard_club(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "reception-track",
+            tmp_path / "reception.mp3",
+            title="Reception Song",
+            artist="Warm Artist",
+            profile_text="romantic happy uplifting danceable wedding reception",
+            tags=[
+                ("essentia:mood", "romantic", 0.8),
+                ("essentia:mood", "happy", 0.8),
+                ("essentia:mood", "uplifting", 0.7),
+                ("derived:features", "danceable", 0.9),
+            ],
+            energy=0.62,
+            aggression=0.12,
+            danceability=0.84,
+            bpm=116.0,
+        )
+        _insert_context(conn, "reception-track", "party", 0.82, 0.75)
+        _insert_context(conn, "reception-track", "dinner", 0.74, 0.75)
+        _insert_context(conn, "reception-track", "warm_lounge", 0.78, 0.75)
+        _insert_track(
+            conn,
+            "hard-club-track",
+            tmp_path / "hard-club.mp3",
+            title="Hard Club Song",
+            artist="Dark Artist",
+            profile_text="dark hard techno workout club",
+            tags=[
+                ("derived:features", "danceable", 0.9),
+                ("derived:features", "dark", 1.0),
+                ("essentia:genre", "electronic---hard techno", 0.8),
+                ("essentia:mood", "aggressive", 0.7),
+            ],
+            energy=0.98,
+            aggression=0.75,
+            danceability=0.86,
+            bpm=145.0,
+        )
+        _insert_context(conn, "hard-club-track", "party", 0.60, 0.70)
+        _insert_context(conn, "hard-club-track", "club", 0.95, 0.80)
+        conn.commit()
+
+        response = search_music(conn, "wedding", limit=2, explain=True)
+
+        assert response.intent.contexts == ["wedding"]
+        assert response.results[0].track_id == "reception-track"
+        assert response.results[0].breakdown["tag_score"] > 0
+        assert response.results[0].breakdown["context_score"] > 0
+        assert response.results[1].track_id == "hard-club-track"
+        assert response.results[1].breakdown["avoided_tags"]
+    finally:
+        conn.close()
+
+
+def test_search_music_suppresses_near_duplicate_metadata_tracks(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        for track_id, filename in [
+            ("duplicate-a", "Track A.mp3"),
+            ("duplicate-b", "Track%20A.mp3"),
+        ]:
+            _insert_track(
+                conn,
+                track_id,
+                tmp_path / filename,
+                title="Same Song (Original Mix)",
+                artist="Same Artist",
+                profile_text="happy dance party",
+                tags=[("essentia:mood", "happy", 0.9)],
+                energy=0.70,
+                aggression=0.20,
+                danceability=0.85,
+                bpm=120.0,
+            )
+        _insert_track(
+            conn,
+            "other-track",
+            tmp_path / "other.mp3",
+            title="Other Song",
+            artist="Other Artist",
+            profile_text="happy dance party",
+            tags=[("essentia:mood", "happy", 0.8)],
+            energy=0.70,
+            aggression=0.20,
+            danceability=0.85,
+            bpm=120.0,
+        )
+
+        response = search_music(conn, "happy party", limit=10)
+
+        track_ids = [result.track_id for result in response.results]
+        assert len({"duplicate-a", "duplicate-b"}.intersection(track_ids)) == 1
+        assert "other-track" in track_ids
+        assert response.diagnostics["duplicate_suppressed_count"] == 1
+    finally:
+        conn.close()
+
+
+def test_search_ignores_conversational_fragments_for_metadata(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "i-monster",
+            tmp_path / "i-monster.mp3",
+            title="Daydream In Blue",
+            artist="I Monster",
+            profile_text="blue electronic",
+            tags=[],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.50,
+            bpm=110.0,
+        )
+        _insert_track(
+            conn,
+            "i-am-late",
+            tmp_path / "i-am-late.mp3",
+            title="Sorry I Am Late",
+            artist="Kollektiv Turmstrasse",
+            profile_text="late electronic",
+            tags=[],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.50,
+            bpm=110.0,
+        )
+
+        response = search_music(conn, "I’m in owe", limit=5, explain=True)
+
+        assert response.intent.query_terms == ["owe"]
+        assert response.results == []
+    finally:
+        conn.close()
+
+
+def test_semantic_only_matches_are_low_confidence_with_explanation(monkeypatch, tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "semantic-track",
+            tmp_path / "semantic.mp3",
+            title="Unrelated",
+            artist="Artist",
+            profile_text="plain local profile",
+            tags=[],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.50,
+            bpm=110.0,
+        )
+        save_profile_embedding(
+            conn,
+            "semantic-track",
+            "plain local profile",
+            [1.0, 0.0],
+            model_name="model-a",
+        )
+        conn.commit()
+
+        def fake_semantic_search(*_args, **_kwargs):
+            return [SimpleNamespace(track_id="semantic-track", score=0.45)]
+
+        monkeypatch.setattr("musicidx.search.ranker.search_semantic", fake_semantic_search)
+
+        response = search_music(
+            conn,
+            "obscure semantic idea",
+            semantic_model="model-a",
+            limit=1,
+            explain=True,
+        )
+
+        assert response.results[0].breakdown["evidence"]["semantic_only"] is True
+        assert response.results[0].breakdown["confidence"] == "low"
+        explanation = "; ".join(response.results[0].explanation)
+        assert "semantic-only match" in explanation
+        assert "low confidence" in explanation
+    finally:
+        conn.close()
+
+
 def test_judge_command_persists_feedback_and_feedback_affects_ranking(tmp_path):
     db_path = tmp_path / "index.sqlite"
     conn = connect_db(db_path)
@@ -771,6 +1064,17 @@ def test_judge_command_persists_feedback_and_feedback_affects_ranking(tmp_path):
         assert "positive feedback boost" in "; ".join(response.results[0].explanation)
     finally:
         conn.close()
+
+
+def _insert_context(conn, track_id: str, context: str, score: float, confidence: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO track_context_fit (
+            track_id, context, score, confidence, evidence_json, updated_at
+        ) VALUES (?, ?, ?, ?, '{}', '2026-01-01T00:00:00+00:00')
+        """,
+        (track_id, context, score, confidence),
+    )
 
 
 def _insert_track(
