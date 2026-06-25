@@ -120,16 +120,17 @@ musicidx search "chill bar" --format json --concise --limit 10 --explain
 
 Important top-level fields:
 
-Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `sort_by`, `score_warnings`, and `duplicate_suppressed_count`.
+Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `sort_by`, `score_warnings`, `duplicate_suppressed_count`, `result_notice`, and `suggested_queries`.
 
 | Field | Meaning |
 | --- | --- |
 | `db_path` | SQLite DB used for the search. |
 | `query` | Original user query. |
 | `parser` | Parser mode, for example `dynamic` or `dynamic+gemini`. |
-| `llm_error` | LLM failure message when `--llm` fallback occurred. |
-| `intent` | Compact parsed intent. |
-| `diagnostics` | Candidate counts, ranking weights, semantic errors, score calibration, weak-score warnings, and duplicate suppression counts. |
+| `llm_error` | LLM failure/guardrail message when `--llm` fallback occurred. |
+| `llm_hints` | Raw LLM-provided hints that passed guardrails, shown separately from merged local intent. |
+| `intent` | Compact parsed intent after local parser + accepted LLM hints are merged. |
+| `diagnostics` | Candidate counts, ranking weights, semantic errors, score calibration, weak-score warnings, duplicate suppression counts, no/weak-result notices, and suggested query corrections/examples. |
 | `results` | Ranked result list. |
 
 Important result fields:

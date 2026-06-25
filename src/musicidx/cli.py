@@ -56,7 +56,14 @@ from musicidx.derived import rebuild_derived_signals
 from musicidx.failures import list_failed_tracks, record_track_error, reset_failed_tracks
 from musicidx.fingerprint import find_duplicate_groups, is_fpcalc_available, process_fingerprints
 from musicidx.health import build_index_health
-from musicidx.metadata import is_ffprobe_available, process_metadata, search_text
+from musicidx.metadata import (
+    MetadataRepairSummary,
+    is_ffprobe_available,
+    process_metadata,
+    repair_metadata_from_duplicate_candidates,
+    repair_metadata_from_filename,
+    search_text,
+)
 from musicidx.missing import list_missing_tracks, prune_missing_tracks
 from musicidx.profiles import rebuild_track_profiles
 from musicidx.resources import (
@@ -86,6 +93,7 @@ from musicidx.search.llm import (
     default_gemini_model,
     is_gemini_configured,
     is_openai_configured,
+    llm_hint_warnings,
     parse_intent_llm,
 )
 from musicidx.search.ranker import search_music
@@ -971,6 +979,88 @@ def metadata_command(
         table.add_row(key, str(payload[key]))
     console.print(f"[bold]Database:[/bold] {db_path}")
     console.print(table)
+
+
+@app.command("repair-metadata")
+def repair_metadata_command(
+    db: DbOption = None,
+    track_id: TrackIdOption = None,
+    from_filename: Annotated[
+        bool,
+        typer.Option("--from-filename", help="Repair title/artist from filename fallbacks."),
+    ] = False,
+    from_duplicates: Annotated[
+        bool,
+        typer.Option("--from-duplicates", help="Repair missing fields from duplicate tracks."),
+    ] = False,
+    missing_only: MissingOnlyOption = False,
+    dry_run: DryRunOption = False,
+    json_output: JsonOption = False,
+) -> None:
+    """Repair stored metadata without re-running ffprobe."""
+    if not from_filename and not from_duplicates:
+        message = "choose at least one repair source: --from-filename or --from-duplicates"
+        if json_output:
+            _print_json({"error": message})
+        else:
+            console.print(f"[red]Error:[/red] {message}")
+        raise typer.Exit(1)
+
+    timer = RuntimeTimer()
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        summaries = []
+        if from_filename:
+            summaries.append(
+                repair_metadata_from_filename(
+                    conn,
+                    track_id=track_id,
+                    missing_only=missing_only,
+                    dry_run=dry_run,
+                )
+            )
+        if from_duplicates:
+            summaries.append(
+                repair_metadata_from_duplicate_candidates(
+                    conn,
+                    track_id=track_id,
+                    missing_only=missing_only,
+                    dry_run=dry_run,
+                )
+            )
+        summary = _combine_metadata_repair_summaries(summaries)
+    finally:
+        conn.close()
+
+    payload = with_runtime_diagnostics(
+        {
+            "db_path": str(db_path),
+            "from_filename": from_filename,
+            "from_duplicates": from_duplicates,
+            "missing_only": missing_only,
+            "dry_run": dry_run,
+            **summary.as_dict(),
+        },
+        timer,
+    )
+    if json_output:
+        _print_json(payload)
+        return
+
+    table = Table(title="Metadata repair summary")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    for key in ["processed", "updated", "skipped", "errors"]:
+        table.add_row(key, str(payload[key]))
+    console.print(f"[bold]Database:[/bold] {db_path}")
+    if dry_run:
+        console.print("[yellow]Dry run:[/yellow] no database changes were written.")
+    console.print(table)
+    for repair in payload["repairs"][:10]:
+        changed = ", ".join(repair["changed_fields"])
+        console.print(f"- {repair['path']} ({changed})")
 
 
 @app.command("rebuild-derived")
@@ -2158,6 +2248,17 @@ def _concise_result(result: Any) -> dict[str, Any]:
     }
 
 
+def _combine_metadata_repair_summaries(summaries: list[Any]) -> MetadataRepairSummary:
+    combined = MetadataRepairSummary(repairs=[])
+    for summary in summaries:
+        combined.processed += int(summary.processed)
+        combined.updated += int(summary.updated)
+        combined.skipped += int(summary.skipped)
+        combined.errors += int(summary.errors)
+        combined.repairs.extend(summary.repairs or [])
+    return combined
+
+
 def _coverage_text(payload: dict[str, Any]) -> str:
     tracks = int(payload.get("tracks", 0) or 0)
     missing = int(payload.get("missing", 0) or 0)
@@ -2202,6 +2303,9 @@ def _maybe_parse_with_llm(
         )
     except LLMIntentError as exc:
         return None, "dynamic", str(exc)
+    warnings = llm_hint_warnings(hints)
+    if warnings:
+        return None, "dynamic", "LLM hints ignored by guardrails: " + "; ".join(warnings)
     return hints, f"dynamic+{llm_provider}", None
 
 

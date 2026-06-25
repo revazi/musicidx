@@ -5,7 +5,12 @@ import json
 import urllib.error
 
 from musicidx.search.intent import LibraryProfile
-from musicidx.search.llm import intent_hints_from_json, parse_intent_gemini, parse_intent_openai
+from musicidx.search.llm import (
+    intent_hints_from_json,
+    llm_hint_warnings,
+    parse_intent_gemini,
+    parse_intent_openai,
+)
 
 
 def test_intent_hints_from_json_sanitizes_invalid_values():
@@ -39,6 +44,22 @@ def test_intent_hints_from_json_sanitizes_invalid_values():
         {"field": "tempo_bpm", "direction": "desc", "source": "llm"}
     ]
     assert hints.notes == "library-aware intent"
+
+
+def test_llm_hint_warnings_rejects_overly_broad_hints():
+    hints = intent_hints_from_json(
+        {
+            "contexts": ["focus", "party", "dinner", "driving"],
+            "prefer_tag_concepts": [f"tag-{index}" for index in range(13)],
+            "avoid_tag_concepts": ["x"],
+        }
+    )
+
+    warnings = llm_hint_warnings(hints)
+
+    assert any("too many contexts" in warning for warning in warnings)
+    assert any("too many preferred tag concepts" in warning for warning in warnings)
+    assert any("suspicious short concepts" in warning for warning in warnings)
 
 
 def test_parse_intent_gemini_uses_generate_content(monkeypatch):

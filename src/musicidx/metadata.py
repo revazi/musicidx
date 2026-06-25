@@ -34,6 +34,16 @@ TEXT_METADATA_FIELDS = (
     "disc_number",
 )
 
+GENERIC_TITLE_NORMS = {
+    "intro",
+    "outro",
+    "untitled",
+    "unknown",
+    "track",
+    "song",
+    "live",
+}
+
 TAG_ALIASES = {
     "title": ["title", "tracktitle", "name"],
     "artist": ["artist", "artists", "performer"],
@@ -112,6 +122,36 @@ class MetadataSummary:
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class MetadataRepair:
+    """One metadata repair applied or proposed for a track."""
+
+    track_id: str
+    path: str
+    before: dict[str, str | None]
+    after: dict[str, str | None]
+    changed_fields: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class MetadataRepairSummary:
+    """Summary counters for metadata repair."""
+
+    processed: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: int = 0
+    repairs: list[MetadataRepair] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["repairs"] = [repair.as_dict() for repair in self.repairs or []]
+        return payload
 
 
 @dataclass(slots=True)
@@ -258,6 +298,124 @@ def process_metadata(
             record_track_error(conn, row["id"], str(exc))
 
     conn.commit()
+    return summary
+
+
+def repair_metadata_from_filename(
+    conn: sqlite3.Connection,
+    *,
+    track_id: str | None = None,
+    missing_only: bool = False,
+    dry_run: bool = False,
+) -> MetadataRepairSummary:
+    """Repair stored display metadata using filename/title fallbacks."""
+    summary = MetadataRepairSummary(repairs=[])
+    rows = _select_tracks_for_metadata_repair(conn, track_id=track_id, missing_only=missing_only)
+    for row in rows:
+        summary.processed += 1
+        try:
+            path = Path(row["path"])
+            current = _track_metadata_from_row(row)
+            repaired = apply_filename_fallback(current, path)
+            changed_fields = _metadata_changed_fields(current, repaired)
+            if not changed_fields:
+                summary.skipped += 1
+                continue
+            repair = MetadataRepair(
+                track_id=row["id"],
+                path=row["path"],
+                before=_display_metadata_dict(current),
+                after=_display_metadata_dict(repaired),
+                changed_fields=changed_fields,
+            )
+            summary.repairs.append(repair)
+            if not dry_run:
+                profile_text, profile_json = build_track_profile(repaired, path)
+                save_track_metadata(
+                    conn,
+                    row["id"],
+                    repaired,
+                    profile_text,
+                    profile_json,
+                    claims=_metadata_repair_claims(current, repaired, path, row),
+                )
+            summary.updated += 1
+        except Exception as exc:  # pragma: no cover - defensive per-track repair isolation
+            summary.errors += 1
+            record_track_error(conn, row["id"], f"metadata repair failed: {exc}")
+    if not dry_run:
+        conn.commit()
+    return summary
+
+
+def repair_metadata_from_duplicate_candidates(
+    conn: sqlite3.Connection,
+    *,
+    track_id: str | None = None,
+    missing_only: bool = True,
+    dry_run: bool = False,
+    duration_tolerance_sec: float = 5.0,
+) -> MetadataRepairSummary:
+    """Repair missing display metadata from matching local duplicate candidates."""
+    summary = MetadataRepairSummary(repairs=[])
+    rows = _select_tracks_for_metadata_repair(conn, track_id=track_id, missing_only=missing_only)
+    for row in rows:
+        summary.processed += 1
+        try:
+            current = _track_metadata_from_row(row)
+            candidate = _duplicate_metadata_candidate(
+                conn,
+                row,
+                current,
+                duration_tolerance_sec=duration_tolerance_sec,
+            )
+            if candidate is None:
+                summary.skipped += 1
+                continue
+            repaired = TrackMetadata(
+                title=current.title or candidate["title"],
+                artist=current.artist or candidate["artist"],
+                album=current.album,
+                album_artist=current.album_artist,
+                genre=current.genre,
+                date=current.date,
+                track_number=current.track_number,
+                disc_number=current.disc_number,
+                duration_sec=current.duration_sec,
+                codec=current.codec,
+                sample_rate=current.sample_rate,
+                bit_rate=current.bit_rate,
+                channels=current.channels,
+            )
+            changed_fields = _metadata_changed_fields(current, repaired)
+            if not changed_fields:
+                summary.skipped += 1
+                continue
+            repair = MetadataRepair(
+                track_id=row["id"],
+                path=row["path"],
+                before=_display_metadata_dict(current),
+                after=_display_metadata_dict(repaired),
+                changed_fields=changed_fields,
+            )
+            summary.repairs.append(repair)
+            if not dry_run:
+                path = Path(row["path"])
+                profile_text, profile_json = build_track_profile(repaired, path)
+                save_track_metadata(
+                    conn,
+                    row["id"],
+                    repaired,
+                    profile_text,
+                    profile_json,
+                    claims=_metadata_duplicate_repair_claims(current, repaired, candidate),
+                )
+            summary.updated += 1
+        except Exception as exc:  # pragma: no cover - defensive per-track repair isolation
+            summary.errors += 1
+            record_track_error(conn, row["id"], f"duplicate metadata repair failed: {exc}")
+    if not dry_run:
+        conn.commit()
     return summary
 
 
@@ -799,6 +957,284 @@ def _select_tracks_for_metadata(
         f"SELECT id, path FROM tracks WHERE {' AND '.join(clauses)} ORDER BY path",
         params,
     ).fetchall()
+
+
+def _select_tracks_for_metadata_repair(
+    conn: sqlite3.Connection,
+    *,
+    track_id: str | None,
+    missing_only: bool,
+) -> list[sqlite3.Row]:
+    clauses = ["missing_at IS NULL", "quarantined_at IS NULL"]
+    params: list[Any] = []
+    if track_id is not None:
+        clauses.append("id = ?")
+        params.append(track_id)
+    if missing_only:
+        clauses.append(
+            """
+            (
+                title IS NULL
+                OR TRIM(title) = ''
+                OR artist IS NULL
+                OR TRIM(artist) = ''
+            )
+            """
+        )
+    return conn.execute(
+        f"""
+        SELECT
+            id, path, title, artist, album, album_artist, genre, date, track_number,
+            disc_number, duration_sec, fingerprint_duration, codec, sample_rate, bit_rate,
+            channels, metadata_confidence, title_norm, artist_norm, artist_title_norm,
+            chromaprint, content_hash
+        FROM tracks
+        WHERE {' AND '.join(clauses)}
+        ORDER BY path
+        """,
+        params,
+    ).fetchall()
+
+
+def _track_metadata_from_row(row: sqlite3.Row) -> TrackMetadata:
+    return TrackMetadata(
+        title=_clean_value(row["title"]),
+        artist=_clean_value(row["artist"]),
+        album=_clean_value(row["album"]),
+        album_artist=_clean_value(row["album_artist"]),
+        genre=_clean_value(row["genre"]),
+        date=_clean_value(row["date"]),
+        track_number=_clean_value(row["track_number"]),
+        disc_number=_clean_value(row["disc_number"]),
+        duration_sec=row["duration_sec"],
+        codec=_clean_value(row["codec"]),
+        sample_rate=row["sample_rate"],
+        bit_rate=row["bit_rate"],
+        channels=row["channels"],
+    )
+
+
+def _metadata_changed_fields(before: TrackMetadata, after: TrackMetadata) -> list[str]:
+    fields = ["title", "artist", "album", "album_artist", "genre", "date"]
+    return [
+        field_name
+        for field_name in fields
+        if _clean_value(getattr(before, field_name)) != _clean_value(getattr(after, field_name))
+    ]
+
+
+def _display_metadata_dict(metadata: TrackMetadata) -> dict[str, str | None]:
+    return {
+        "title": metadata.title,
+        "artist": metadata.artist,
+        "album": metadata.album,
+        "album_artist": metadata.album_artist,
+        "genre": metadata.genre,
+        "date": metadata.date,
+    }
+
+
+def _duplicate_metadata_candidate(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    metadata: TrackMetadata,
+    *,
+    duration_tolerance_sec: float,
+) -> dict[str, Any] | None:
+    if metadata.artist and metadata.title:
+        return None
+    title_norm = normalize_metadata_value(metadata.title)
+    if not title_norm or title_norm in GENERIC_TITLE_NORMS or len(title_norm) < 8:
+        return None
+    candidates = conn.execute(
+        """
+        SELECT id, title, artist, title_norm, artist_norm, duration_sec,
+               fingerprint_duration, chromaprint, content_hash, metadata_confidence
+        FROM tracks
+        WHERE id != ?
+          AND missing_at IS NULL
+          AND quarantined_at IS NULL
+          AND artist IS NOT NULL
+          AND TRIM(artist) != ''
+          AND title IS NOT NULL
+          AND TRIM(title) != ''
+          AND (title_norm = ? OR LOWER(TRIM(title)) = LOWER(TRIM(?)))
+        ORDER BY metadata_confidence DESC, artist, title
+        """,
+        (row["id"], title_norm, metadata.title),
+    ).fetchall()
+    if not candidates:
+        return None
+
+    scored: list[dict[str, Any]] = []
+    for candidate in candidates:
+        reason, confidence = _duplicate_candidate_reason(row, candidate, duration_tolerance_sec)
+        if reason is None:
+            continue
+        scored.append(
+            {
+                "track_id": candidate["id"],
+                "title": candidate["title"],
+                "artist": candidate["artist"],
+                "reason": reason,
+                "confidence": confidence,
+            }
+        )
+    if not scored:
+        known_artists = {
+            normalize_metadata_value(candidate["artist"]): candidate for candidate in candidates
+        }
+        if len(known_artists) != 1:
+            return None
+        candidate = next(iter(known_artists.values()))
+        scored.append(
+            {
+                "track_id": candidate["id"],
+                "title": candidate["title"],
+                "artist": candidate["artist"],
+                "reason": "same title and unique known artist in library",
+                "confidence": 0.62,
+            }
+        )
+
+    artist_norms = {normalize_metadata_value(item["artist"]) for item in scored}
+    if len(artist_norms) != 1:
+        return None
+    scored.sort(key=lambda item: (float(item["confidence"]), item["reason"]), reverse=True)
+    return scored[0]
+
+
+def _duplicate_candidate_reason(
+    row: sqlite3.Row,
+    candidate: sqlite3.Row,
+    duration_tolerance_sec: float,
+) -> tuple[str | None, float]:
+    if row["content_hash"] and row["content_hash"] == candidate["content_hash"]:
+        return "same content hash", 0.94
+    if row["chromaprint"] and row["chromaprint"] == candidate["chromaprint"]:
+        return "same chromaprint", 0.88
+    duration = _best_duration(row)
+    candidate_duration = _best_duration(candidate)
+    if duration is not None and candidate_duration is not None:
+        delta = abs(duration - candidate_duration)
+        if delta <= duration_tolerance_sec:
+            confidence = max(0.68, 0.80 - (delta / max(duration_tolerance_sec, 1.0)) * 0.10)
+            return "same title and similar duration", round(confidence, 6)
+    return None, 0.0
+
+
+def _best_duration(row: sqlite3.Row) -> float | None:
+    value = row["fingerprint_duration"] if "fingerprint_duration" in row.keys() else None
+    if value is None:
+        value = row["duration_sec"]
+    return None if value is None else float(value)
+
+
+def _metadata_duplicate_repair_claims(
+    existing: TrackMetadata,
+    repaired: TrackMetadata,
+    candidate: dict[str, Any],
+) -> list[MetadataClaim]:
+    claims: list[MetadataClaim] = []
+    for field_name in TEXT_METADATA_FIELDS:
+        value = getattr(existing, field_name)
+        if value:
+            claims.append(
+                MetadataClaim(
+                    field_name=field_name,
+                    value_text=value,
+                    source="existing_database",
+                    source_detail="stored track metadata before repair",
+                    confidence=0.70,
+                )
+            )
+    for field_name in ["artist", "title"]:
+        value = candidate.get(field_name)
+        if value:
+            claims.append(
+                MetadataClaim(
+                    field_name=field_name,
+                    value_text=value,
+                    source="duplicate_metadata",
+                    source_detail=str(candidate.get("reason") or "matching local track"),
+                    confidence=float(candidate.get("confidence") or 0.60),
+                )
+            )
+    _mark_selected_claims(claims, repaired)
+    _ensure_selected_claims(claims, repaired)
+    return claims
+
+
+def _metadata_repair_claims(
+    existing: TrackMetadata,
+    repaired: TrackMetadata,
+    path: Path,
+    row: sqlite3.Row,
+) -> list[MetadataClaim]:
+    claims: list[MetadataClaim] = []
+    existing_confidence = max(0.35, min(0.86, float(row["metadata_confidence"] or 0.70)))
+    for field_name in TEXT_METADATA_FIELDS:
+        value = getattr(existing, field_name)
+        if value:
+            claims.append(
+                MetadataClaim(
+                    field_name=field_name,
+                    value_text=value,
+                    source="existing_database",
+                    source_detail="stored track metadata before repair",
+                    confidence=existing_confidence,
+                )
+            )
+
+    filename_metadata = infer_metadata_from_filename(path)
+    filename_confidence = 0.58 if filename_metadata.artist and filename_metadata.title else 0.45
+    if filename_metadata.artist:
+        claims.append(
+            MetadataClaim(
+                field_name="artist",
+                value_text=filename_metadata.artist,
+                source="filename_parser",
+                source_detail="artist - title filename pattern",
+                confidence=filename_confidence,
+            )
+        )
+    if filename_metadata.title:
+        claims.append(
+            MetadataClaim(
+                field_name="title",
+                value_text=filename_metadata.title,
+                source="filename_parser",
+                source_detail="filename stem",
+                confidence=filename_confidence,
+            )
+        )
+
+    parsed_title = infer_metadata_from_text(existing.title) if existing.title else None
+    if parsed_title and not existing.artist:
+        if parsed_title.artist:
+            claims.append(
+                MetadataClaim(
+                    field_name="artist",
+                    value_text=parsed_title.artist,
+                    source="derived",
+                    source_detail="artist-title pattern in stored title",
+                    confidence=0.72,
+                )
+            )
+        if parsed_title.title:
+            claims.append(
+                MetadataClaim(
+                    field_name="title",
+                    value_text=parsed_title.title,
+                    source="derived",
+                    source_detail="artist-title pattern in stored title",
+                    confidence=0.72,
+                )
+            )
+
+    _mark_selected_claims(claims, repaired)
+    _ensure_selected_claims(claims, repaired)
+    return claims
 
 
 def _collect_tags(format_info: dict[str, Any], audio_stream: dict[str, Any]) -> dict[str, str]:

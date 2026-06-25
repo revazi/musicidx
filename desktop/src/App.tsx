@@ -99,6 +99,28 @@ type SearchSortSpec = {
   source?: string;
 };
 
+type SearchSuggestion = {
+  query: string;
+  confidence?: number;
+  reason?: string;
+  kind?: "correction" | "example" | string;
+};
+
+type SearchNotice = {
+  level?: "info" | "warning" | "error" | string;
+  message?: string;
+};
+
+type SearchLlmHints = {
+  contexts?: string[];
+  prefer_tag_concepts?: string[];
+  avoid_tag_concepts?: string[];
+  feature_preferences?: Record<string, string>;
+  sort_by?: SearchSortSpec[];
+  limit?: number | null;
+  notes?: string | null;
+};
+
 type SearchIntentSummary = {
   limit?: number;
   contexts?: string[];
@@ -114,6 +136,7 @@ type SearchPayload = {
   query?: string;
   parser?: string;
   llm_error?: string | null;
+  llm_hints?: SearchLlmHints | null;
   intent?: SearchIntentSummary;
   diagnostics?: Record<string, unknown>;
   results?: SearchResult[];
@@ -301,6 +324,17 @@ export default function App() {
         args: () => ["metadata", "--missing-only", "--json"],
       },
       {
+        id: "repair-metadata",
+        label: "Repair metadata",
+        args: () => [
+          "repair-metadata",
+          "--from-filename",
+          "--from-duplicates",
+          "--missing-only",
+          "--json",
+        ],
+      },
+      {
         id: "fingerprint",
         label: "Fingerprint",
         args: () => ["fingerprint", "--missing-only", "--json"],
@@ -374,6 +408,17 @@ export default function App() {
         id: "metadata",
         label: "Read metadata",
         args: () => ["metadata", "--missing-only", "--json"],
+      },
+      {
+        id: "repair-metadata",
+        label: "Repair metadata",
+        args: () => [
+          "repair-metadata",
+          "--from-filename",
+          "--from-duplicates",
+          "--missing-only",
+          "--json",
+        ],
       },
       {
         id: "fingerprint",
@@ -706,11 +751,15 @@ export default function App() {
     }
   }
 
-  async function searchMusic() {
+  async function searchMusic(queryOverride?: string) {
     persistSettings(settings);
+    const searchQuery = queryOverride ?? query;
+    if (queryOverride !== undefined) {
+      setQuery(queryOverride);
+    }
     const args = [
       "search",
-      required(query, "Query"),
+      required(searchQuery, "Query"),
       "--format",
       "json",
       "--concise",
@@ -1421,7 +1470,7 @@ export default function App() {
                   }
                 }}
               />
-              <Button className="rounded-full px-5" disabled={busy} onClick={searchMusic}>
+              <Button className="rounded-full px-5" disabled={busy} onClick={() => void searchMusic()}>
                 Search
               </Button>
             </div>
@@ -1452,7 +1501,9 @@ export default function App() {
                 Parse intent
               </Button>
             </div>
-            {lastSearchPayload ? <SearchParametersPanel payload={lastSearchPayload} /> : null}
+            {lastSearchPayload ? (
+              <SearchParametersPanel payload={lastSearchPayload} onSearchSuggestion={searchMusic} />
+            ) : null}
             <div className="rounded-lg border bg-muted/50 px-3 py-2 text-xs text-muted-foreground wrap-anywhere">
               {backgroundStatus}
             </div>
@@ -1690,14 +1741,24 @@ function Shell({
   );
 }
 
-function SearchParametersPanel({ payload }: { payload: SearchPayload }) {
+function SearchParametersPanel({
+  payload,
+  onSearchSuggestion,
+}: {
+  payload: SearchPayload;
+  onSearchSuggestion: (query: string) => Promise<void>;
+}) {
   const intent = payload.intent ?? {};
   const diagnostics = payload.diagnostics ?? {};
   const featureEntries = Object.entries(intent.feature_ranges ?? {});
   const sortSpecs = intent.sort_by ?? [];
   const weights = recordValue(diagnostics.weights);
   const scoreWarnings = stringList(diagnostics.score_warnings);
+  const suggestions = searchSuggestionsFromDiagnostics(diagnostics);
+  const hasCorrectionSuggestion = suggestions.some((suggestion) => suggestion.kind === "correction");
+  const notice = searchNoticeFromDiagnostics(diagnostics);
   const llmUsed = Boolean(payload.parser && payload.parser !== "dynamic");
+  const llmHints = payload.llm_hints;
   return (
     <div className="grid gap-3 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
       <div className="flex flex-wrap items-center gap-2">
@@ -1717,6 +1778,65 @@ function SearchParametersPanel({ payload }: { payload: SearchPayload }) {
         <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-destructive">
           LLM failed; search used local dynamic intent. {payload.llm_error.split("\n")[0]}
         </div>
+      ) : null}
+      {notice?.message ? (
+        <div
+          className={cn(
+            "rounded-md border p-2",
+            notice.level === "warning"
+              ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+              : "bg-background/50",
+          )}
+        >
+          {notice.message}
+        </div>
+      ) : null}
+      {suggestions.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background/50 p-2">
+          <span className="font-medium text-foreground">
+            {hasCorrectionSuggestion ? "Did you mean / try:" : "Try:"}
+          </span>
+          {suggestions.map((suggestion) => (
+            <Button
+              key={`${suggestion.kind || "suggestion"}:${suggestion.query}`}
+              size="sm"
+              variant={suggestion.kind === "correction" ? "default" : "outline"}
+              title={suggestion.reason}
+              onClick={() => void onSearchSuggestion(suggestion.query)}
+            >
+              {suggestion.query}
+              {typeof suggestion.confidence === "number" ? ` ${(suggestion.confidence * 100).toFixed(0)}%` : ""}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+
+      {llmHints ? (
+        <details className="rounded-md border bg-background/50 p-2">
+          <summary className="cursor-pointer font-medium text-foreground">
+            LLM-provided hints before local validation/merge
+          </summary>
+          <div className="mt-2 grid gap-2 md:grid-cols-2">
+            <SearchParamBlock label="LLM contexts" value={chipList(llmHints.contexts)} />
+            <SearchParamBlock
+              label="LLM prefer concepts"
+              value={chipList(llmHints.prefer_tag_concepts, 12)}
+            />
+            <SearchParamBlock
+              label="LLM avoid concepts"
+              value={chipList(llmHints.avoid_tag_concepts, 12)}
+            />
+            <SearchParamBlock
+              label="LLM features"
+              value={formatFeaturePreferences(llmHints.feature_preferences)}
+            />
+            <SearchParamBlock
+              label="LLM sort"
+              value={llmHints.sort_by?.length ? llmHints.sort_by.map(formatSortSpec).join(" · ") : "none"}
+            />
+            <SearchParamBlock label="LLM notes" value={llmHints.notes || "none"} />
+          </div>
+        </details>
       ) : null}
 
       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -2150,6 +2270,42 @@ function formatClock(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function searchSuggestionsFromDiagnostics(diagnostics: Record<string, unknown>): SearchSuggestion[] {
+  const value = diagnostics.suggested_queries;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const suggestions: SearchSuggestion[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.query !== "string" || !record.query.trim()) {
+      continue;
+    }
+    suggestions.push({
+      query: record.query,
+      confidence: typeof record.confidence === "number" ? record.confidence : undefined,
+      reason: typeof record.reason === "string" ? record.reason : undefined,
+      kind: typeof record.kind === "string" ? record.kind : undefined,
+    });
+  }
+  return suggestions;
+}
+
+function searchNoticeFromDiagnostics(diagnostics: Record<string, unknown>): SearchNotice | null {
+  const value = diagnostics.result_notice;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    level: typeof record.level === "string" ? record.level : undefined,
+    message: typeof record.message === "string" ? record.message : undefined,
+  };
+}
+
 function chipList(values: string[] | undefined, max = 8): string {
   if (!values || values.length === 0) {
     return "none";
@@ -2157,6 +2313,15 @@ function chipList(values: string[] | undefined, max = 8): string {
   const shown = values.slice(0, max);
   const suffix = values.length > max ? ` +${values.length - max} more` : "";
   return `${shown.join(", ")}${suffix}`;
+}
+
+function formatFeaturePreferences(preferences: Record<string, string> | undefined): string {
+  if (!preferences || Object.keys(preferences).length === 0) {
+    return "none";
+  }
+  return Object.entries(preferences)
+    .map(([field, level]) => `${field.replaceAll("_", " ")} ${level.replaceAll("_", " ")}`)
+    .join(" · ");
 }
 
 function formatFeatureRange([field, range]: [string, SearchFeatureRange]): string {

@@ -958,6 +958,75 @@ def test_search_ignores_conversational_fragments_for_metadata(tmp_path):
 
         assert response.intent.query_terms == ["owe"]
         assert response.results == []
+        suggestions = response.diagnostics["suggested_queries"]
+        assert response.diagnostics["result_notice"]["level"] == "warning"
+        assert suggestions[0]["query"] == "I’m in love"
+        assert suggestions[0]["kind"] == "correction"
+        assert "romantic" in {suggestion["query"] for suggestion in suggestions}
+    finally:
+        conn.close()
+
+
+def test_search_suggests_fallback_examples_for_unstructured_no_result(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "plain-track",
+            tmp_path / "plain.mp3",
+            title="Plain Track",
+            artist="Artist",
+            profile_text="plain track",
+            tags=[],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.50,
+            bpm=110.0,
+        )
+
+        response = search_music(conn, "zzzxqv", limit=5)
+
+        assert response.results == []
+        suggestions = response.diagnostics["suggested_queries"]
+        assert response.diagnostics["result_notice"]["level"] == "warning"
+        assert [suggestion["kind"] for suggestion in suggestions] == ["example"] * len(
+            suggestions
+        )
+        assert {"I'm in love", "romantic", "love songs"}.issubset(
+            {suggestion["query"] for suggestion in suggestions}
+        )
+    finally:
+        conn.close()
+
+
+def test_search_suggests_tag_typo_correction(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "techno-track",
+            tmp_path / "techno.mp3",
+            title="Techno Track",
+            artist="Artist",
+            profile_text="electronic techno club",
+            tags=[("essentia:genre", "electronic---techno", 0.8)],
+            energy=0.80,
+            aggression=0.40,
+            danceability=0.80,
+            bpm=126.0,
+        )
+
+        response = search_music(conn, "tehno", limit=5)
+
+        suggestions = response.diagnostics["suggested_queries"]
+        assert suggestions[0]["query"] == "techno"
+        assert suggestions[0]["replacement"] == {
+            "from": "tehno",
+            "to": "techno",
+            "edit_distance": 1,
+        }
     finally:
         conn.close()
 

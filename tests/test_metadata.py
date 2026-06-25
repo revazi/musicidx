@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+from typer.testing import CliRunner
+
+from musicidx.cli import app
 from musicidx.db import connect_db, init_db
 from musicidx.metadata import (
     MetadataExtractionResult,
@@ -13,6 +16,8 @@ from musicidx.metadata import (
     metadata_from_ffprobe_json,
     normalize_metadata_value,
     process_metadata,
+    repair_metadata_from_duplicate_candidates,
+    repair_metadata_from_filename,
     save_track_metadata,
     search_text,
 )
@@ -217,6 +222,132 @@ def test_metadata_missing_only_retries_titleless_profiled_tracks(monkeypatch, tm
         assert summary.updated == 1
         row = conn.execute("SELECT title FROM tracks WHERE id = 'track-1'").fetchone()
         assert row["title"] == "Untitled"
+    finally:
+        conn.close()
+
+
+def test_repair_metadata_from_filename_fills_missing_artist_and_updates_profile(tmp_path):
+    track_path = tmp_path / "Donna Summer - Love To Love You Baby.mp3"
+    track_path.write_bytes(b"audio")
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(conn, "track-1", track_path)
+        metadata = TrackMetadata(title="Love To Love You Baby", duration_sec=255.0)
+        profile_text, profile_json = build_track_profile(metadata, track_path)
+        save_track_metadata(conn, "track-1", metadata, profile_text, profile_json)
+        conn.commit()
+
+        summary = repair_metadata_from_filename(conn, missing_only=True)
+
+        assert summary.processed == 1
+        assert summary.updated == 1
+        assert summary.repairs is not None
+        assert summary.repairs[0].changed_fields == ["artist"]
+        row = conn.execute(
+            """
+            SELECT title, artist, artist_title_norm
+            FROM tracks WHERE id = 'track-1'
+            """
+        ).fetchone()
+        assert row["title"] == "Love To Love You Baby"
+        assert row["artist"] == "Donna Summer"
+        assert row["artist_title_norm"] == "donna summer love to love you baby"
+        profile = conn.execute(
+            "SELECT embedding_text FROM track_profiles WHERE track_id = 'track-1'"
+        ).fetchone()
+        assert "Donna Summer - Love To Love You Baby" in profile["embedding_text"]
+    finally:
+        conn.close()
+
+
+def test_repair_metadata_from_duplicate_candidates_fills_missing_artist(tmp_path):
+    known_path = tmp_path / "Julio Iglesias - Cu Cu Rru Cu Cu Paloma.mp3"
+    unknown_path = tmp_path / "Cu Cu Rru Cu Cu Paloma.mp3"
+    known_path.write_bytes(b"audio")
+    unknown_path.write_bytes(b"audio")
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(conn, "known", known_path)
+        save_track_metadata(
+            conn,
+            "known",
+            TrackMetadata(
+                title="Cu Cu Rru Cu Cu Paloma",
+                artist="Julio Iglesias",
+                duration_sec=208.50,
+            ),
+            *build_track_profile(
+                TrackMetadata(
+                    title="Cu Cu Rru Cu Cu Paloma",
+                    artist="Julio Iglesias",
+                    duration_sec=208.50,
+                ),
+                known_path,
+            ),
+        )
+        _insert_track(conn, "unknown", unknown_path)
+        save_track_metadata(
+            conn,
+            "unknown",
+            TrackMetadata(title="Cu Cu Rru Cu Cu Paloma", duration_sec=208.48),
+            *build_track_profile(
+                TrackMetadata(title="Cu Cu Rru Cu Cu Paloma", duration_sec=208.48),
+                unknown_path,
+            ),
+        )
+        conn.commit()
+
+        summary = repair_metadata_from_duplicate_candidates(conn, missing_only=True)
+
+        assert summary.updated == 1
+        assert summary.repairs is not None
+        assert summary.repairs[0].track_id == "unknown"
+        assert summary.repairs[0].after["artist"] == "Julio Iglesias"
+        row = conn.execute("SELECT artist FROM tracks WHERE id = 'unknown'").fetchone()
+        assert row["artist"] == "Julio Iglesias"
+    finally:
+        conn.close()
+
+
+def test_repair_metadata_command_json_dry_run(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    track_path = tmp_path / "Prince - International Lover.mp3"
+    track_path.write_bytes(b"audio")
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(conn, "track-1", track_path)
+        metadata = TrackMetadata(title="International Lover")
+        profile_text, profile_json = build_track_profile(metadata, track_path)
+        save_track_metadata(conn, "track-1", metadata, profile_text, profile_json)
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "repair-metadata",
+            "--db",
+            str(db_path),
+            "--from-filename",
+            "--from-duplicates",
+            "--missing-only",
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["updated"] == 1
+    assert payload["repairs"][0]["after"]["artist"] == "Prince"
+    conn = connect_db(db_path)
+    try:
+        row = conn.execute("SELECT artist FROM tracks WHERE id = 'track-1'").fetchone()
+        assert row["artist"] is None
     finally:
         conn.close()
 

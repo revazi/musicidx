@@ -33,6 +33,67 @@ GENERIC_EXPLANATION_TAGS = {
     "no_vocals_background",
 }
 
+TYPO_SUGGESTION_TERMS = {
+    "ambient",
+    "bar",
+    "chill",
+    "dance",
+    "dinner",
+    "disco",
+    "driving",
+    "focus",
+    "happy",
+    "house",
+    "love",
+    "party",
+    "relaxing",
+    "romantic",
+    "techno",
+    "uplifting",
+    "wedding",
+    "workout",
+}
+
+FALLBACK_SEARCH_EXAMPLES = [
+    {
+        "query": "I'm in love",
+        "reason": "romantic/love mood search",
+    },
+    {
+        "query": "romantic",
+        "reason": "broad romantic mood search",
+    },
+    {
+        "query": "love songs",
+        "reason": "direct love-song intent",
+    },
+    {
+        "query": "chill bar",
+        "reason": "context plus mood search",
+    },
+    {
+        "query": "wedding reception",
+        "reason": "occasion/event search",
+    },
+]
+
+TYPO_SUGGESTION_SKIP_TERMS = {
+    "aggression",
+    "bpm",
+    "brightness",
+    "danceability",
+    "energy",
+    "fast",
+    "high",
+    "low",
+    "medium",
+    "mid",
+    "midtempo",
+    "slow",
+    "tempo",
+    "very",
+}
+
 METADATA_STOP_WORDS = {
     "a",
     "an",
@@ -179,6 +240,7 @@ def search_music(
     )
     display_results = _with_display_scores(limited_results)
     top_raw_score = _top_raw_score(limited_results)
+    suggested_queries = _suggested_queries(intent, limited_results, top_raw_score)
     diagnostics = {
         "candidate_count": len(track_rows),
         "scored_candidate_count": len(scored_results),
@@ -198,6 +260,8 @@ def search_music(
         "weak_top_result_score": WEAK_TOP_RESULT_SCORE,
         "score_warnings": _score_warnings(top_raw_score, limited_results),
         "duplicate_suppressed_count": max(0, len(sorted_results) - len(deduplicated)),
+        "suggested_queries": suggested_queries,
+        "result_notice": _result_notice(limited_results, top_raw_score, suggested_queries),
     }
     return SearchResponse(
         query=query,
@@ -285,6 +349,168 @@ def _score_warnings(top_raw_score: float, results: list[SearchResult]) -> list[s
     ):
         warnings.append("semantic_only_results")
     return warnings
+
+
+def _result_notice(
+    results: list[SearchResult],
+    top_raw_score: float,
+    suggested_queries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not results:
+        message = "No strong local evidence found."
+        if suggested_queries:
+            message += " Try a suggested query."
+        else:
+            message += " Try broader mood, artist, title, or context terms."
+        return {"level": "warning", "message": message}
+    if top_raw_score < WEAK_TOP_RESULT_SCORE:
+        return {
+            "level": "warning",
+            "message": (
+                "Best matches are low confidence; scores are shown as raw calibrated relevance."
+            ),
+        }
+    return None
+
+
+def _suggested_queries(
+    intent: SearchIntent,
+    results: list[SearchResult],
+    top_raw_score: float,
+) -> list[dict[str, Any]]:
+    if results and top_raw_score >= WEAK_TOP_RESULT_SCORE:
+        return []
+    terms = [term for term in intent.query_terms if len(term) >= 3]
+    if not terms:
+        return []
+    vocabulary = _suggestion_vocabulary(intent)
+    suggestions: list[dict[str, Any]] = []
+    for term in terms:
+        candidate = _best_typo_candidate(term, intent.query, vocabulary)
+        if candidate is None:
+            continue
+        replacement, confidence, distance = candidate
+        suggested_query = _replace_query_term(intent.query, term, replacement)
+        if not suggested_query or suggested_query.casefold() == intent.query.casefold():
+            continue
+        suggestions.append(
+            {
+                "query": suggested_query,
+                "confidence": round(confidence, 3),
+                "kind": "correction",
+                "reason": f"'{term}' looks like '{replacement}'",
+                "replacement": {"from": term, "to": replacement, "edit_distance": distance},
+            }
+        )
+    if _should_add_fallback_suggestions(intent, results, top_raw_score):
+        suggestions.extend(_fallback_search_suggestions())
+
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for suggestion in sorted(
+        suggestions,
+        key=lambda item: (item.get("kind") != "correction", -float(item.get("confidence") or 0.0)),
+    ):
+        key = _suggestion_key(str(suggestion["query"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(suggestion)
+    return output[:5]
+
+
+def _should_add_fallback_suggestions(
+    intent: SearchIntent,
+    results: list[SearchResult],
+    top_raw_score: float,
+) -> bool:
+    has_structured_intent = bool(
+        intent.contexts
+        or intent.prefer_tags
+        or intent.avoid_tags
+        or intent.feature_ranges
+        or intent.sort_by
+    )
+    return not has_structured_intent and (not results or top_raw_score < WEAK_TOP_RESULT_SCORE)
+
+
+def _fallback_search_suggestions() -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "example",
+            "query": item["query"],
+            "reason": item["reason"],
+        }
+        for item in FALLBACK_SEARCH_EXAMPLES
+    ]
+
+
+def _suggestion_key(query: str) -> str:
+    return re.sub(r"\s+", " ", query.casefold().replace("’", "'")).strip()
+
+
+def _suggestion_vocabulary(intent: SearchIntent) -> set[str]:
+    output = set(TYPO_SUGGESTION_TERMS)
+    for tag in intent.library_profile.tag_stats:
+        for term in normalize_tag_terms(tag):
+            if len(term) >= 3 and term not in TYPO_SUGGESTION_SKIP_TERMS:
+                output.add(term)
+    return output
+
+
+def _best_typo_candidate(
+    term: str,
+    query: str,
+    vocabulary: set[str],
+) -> tuple[str, float, int] | None:
+    best: tuple[str, float, int] | None = None
+    for candidate in vocabulary:
+        if candidate == term or abs(len(candidate) - len(term)) > 2:
+            continue
+        distance = _edit_distance(term, candidate)
+        if distance > 2 or (distance > 1 and candidate not in TYPO_SUGGESTION_TERMS):
+            continue
+        confidence = 1.0 - (distance / max(len(term), len(candidate), 1))
+        if candidate in TYPO_SUGGESTION_TERMS:
+            confidence += 0.12
+        if _keyword_present_like(query, f"in {term}") and candidate == "love":
+            confidence += 0.35
+        confidence = min(0.98, confidence)
+        if confidence < 0.70:
+            continue
+        if best is None or confidence > best[1] or (confidence == best[1] and distance < best[2]):
+            best = (candidate, confidence, distance)
+    return best
+
+
+def _replace_query_term(query: str, term: str, replacement: str) -> str:
+    pattern = re.compile(rf"\b{re.escape(term)}\b", flags=re.IGNORECASE)
+    return pattern.sub(replacement, query, count=1)
+
+
+def _keyword_present_like(query: str, phrase: str) -> bool:
+    normalized_query = query.casefold().replace("’", "'").replace("-", " ")
+    normalized_query = re.sub(r"\bi\s*'\s*m\b", "im", normalized_query)
+    normalized_query = re.sub(r"[^a-z0-9]+", " ", normalized_query)
+    normalized_phrase = re.sub(r"[^a-z0-9]+", " ", phrase.casefold())
+    return re.search(rf"\b{re.escape(normalized_phrase)}\b", normalized_query) is not None
+
+
+def _edit_distance(left: str, right: str) -> int:
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            cost = 0 if left_char == right_char else 1
+            current.append(
+                min(
+                    current[right_index - 1] + 1,
+                    previous[right_index] + 1,
+                    previous[right_index - 1] + cost,
+                )
+            )
+        previous = current
+    return previous[-1]
 
 
 def _suppress_near_duplicates(results: list[SearchResult]) -> list[SearchResult]:

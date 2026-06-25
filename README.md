@@ -219,6 +219,7 @@ For laptops, prefer this safer workflow first:
 uv run musicidx init
 uv run musicidx scan /path/to/music
 uv run musicidx metadata --missing-only
+uv run musicidx repair-metadata --from-filename --from-duplicates --missing-only --json
 uv run musicidx fingerprint --missing-only
 uv run musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto
 uv run musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto
@@ -234,6 +235,7 @@ Notes:
 - `analyze-basic --chunked` analyzes the whole track in sequential chunks to reduce peak RAM for long tracks.
 - `analyze-tags` is the most memory-sensitive step; subprocess batches are enabled by default so TensorFlow/Essentia memory is reclaimed between small batches.
 - `rebuild-derived` turns audio features into local feature tags and context-fit scores.
+- `repair-metadata` persistently fills missing title/artist from filename patterns and matching duplicate/alternate tracks.
 - `rebuild-profiles` regenerates profile text/JSON/embedding text after metadata, feature, tag, or context changes.
 - Avoid `embed --refresh` unless you intentionally want to recompute embeddings.
 - See [`.agents/optimisation.md`](.agents/optimisation.md) for the optimisation plan.
@@ -259,6 +261,7 @@ Indexing:
 musicidx init
 musicidx scan /path/to/music --json
 musicidx metadata --missing-only --json
+musicidx repair-metadata --from-filename --from-duplicates --missing-only --json
 musicidx fingerprint --missing-only --json
 musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto --json
 musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto --json

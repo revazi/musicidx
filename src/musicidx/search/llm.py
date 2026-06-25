@@ -30,6 +30,11 @@ DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 SUPPORTED_LLM_PROVIDERS = {"gemini", "openai"}
+MAX_LLM_CONTEXTS = 3
+MAX_LLM_CONCEPTS_PER_SIDE = 12
+MAX_LLM_TOTAL_CONCEPTS = 18
+MAX_LLM_SORT_SPECS = 3
+MIN_LLM_CONCEPT_LENGTH = 2
 
 
 class LLMIntentError(RuntimeError):
@@ -182,6 +187,38 @@ def parse_intent_openai(
         raise LLMIntentError("OpenAI returned invalid intent JSON") from exc
 
     return intent_hints_from_json(parsed)
+
+
+def llm_hint_warnings(hints: IntentHints) -> list[str]:
+    """Return guardrail warnings for suspicious or overly broad LLM hints."""
+    warnings: list[str] = []
+    total_concepts = len(hints.prefer_tag_concepts) + len(hints.avoid_tag_concepts)
+    if len(hints.contexts) > MAX_LLM_CONTEXTS:
+        warnings.append(f"too many contexts ({len(hints.contexts)} > {MAX_LLM_CONTEXTS})")
+    if len(hints.prefer_tag_concepts) > MAX_LLM_CONCEPTS_PER_SIDE:
+        warnings.append(
+            "too many preferred tag concepts "
+            f"({len(hints.prefer_tag_concepts)} > {MAX_LLM_CONCEPTS_PER_SIDE})"
+        )
+    if len(hints.avoid_tag_concepts) > MAX_LLM_CONCEPTS_PER_SIDE:
+        warnings.append(
+            "too many avoided tag concepts "
+            f"({len(hints.avoid_tag_concepts)} > {MAX_LLM_CONCEPTS_PER_SIDE})"
+        )
+    if total_concepts > MAX_LLM_TOTAL_CONCEPTS:
+        warnings.append(
+            f"too many total tag concepts ({total_concepts} > {MAX_LLM_TOTAL_CONCEPTS})"
+        )
+    if len(hints.sort_by) > MAX_LLM_SORT_SPECS:
+        warnings.append(f"too many sort specs ({len(hints.sort_by)} > {MAX_LLM_SORT_SPECS})")
+    short_concepts = [
+        concept
+        for concept in [*hints.prefer_tag_concepts, *hints.avoid_tag_concepts]
+        if len(concept.replace(" ", "")) < MIN_LLM_CONCEPT_LENGTH
+    ]
+    if short_concepts:
+        warnings.append(f"suspicious short concepts: {', '.join(short_concepts[:5])}")
+    return warnings
 
 
 def intent_hints_from_json(data: dict[str, Any]) -> IntentHints:
