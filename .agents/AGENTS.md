@@ -8,20 +8,20 @@ Build MusicIdx as a local-first CLI plus Tauri desktop app that scans a director
 
 The CLI remains the source-of-truth engine. The desktop app is a thin UI over the same local CLI/database.
 
-## Current implementation status — 2026-06-17
+## Current implementation status — 2026-06-25
 
 Implemented and expected:
 
-- Typer CLI with SQLite/FTS5, scanner, metadata, fingerprints, basic features, Essentia tags, profile text, semantic embeddings, hybrid search, export, eval, feedback, missing-track handling, and diagnostics.
-- Tauri desktop UI for indexing/search/settings/playback, including app-open background auto-indexing with cancellation.
+- Typer CLI with SQLite/FTS5, scanner, metadata, metadata repair, fingerprints, basic features, Essentia tags, profile text, semantic embeddings, hybrid search, export, eval, feedback, missing-track handling, index health, and diagnostics.
+- Tauri desktop UI for indexing/search/settings/playback, including app-open background auto-indexing with cancellation, search parameter diagnostics, no/weak-result suggestions, feedback state, and index health.
 - Background indexing is app-open polling, not a daemon. It scans for added/modified/missing/root-missing changes and runs derived indexing only when needed.
 - Missing files are marked with `missing_at`; pruning is explicit via `prune-missing`.
 - Modified files invalidate stale derived metadata/fingerprints/features/tags/profiles/embeddings.
 - Basic audio analysis should use full-track chunked analysis by default. Do **not** use quick/first-120s analysis automatically; `--quick` is only an explicit CLI escape hatch.
 - Semantic search uses sentence-transformers profile-text embeddings. Hybrid search should report `semantic_candidate_count > 0` and `semantic_error: null` when semantics are active.
-- Optional LLM intent parsing supports Gemini/OpenAI. It must always try to produce usable structured music intent for vague/slang/conversational queries unless the user explicitly asks not to search.
+- Optional LLM intent parsing supports Gemini/OpenAI. LLM output is guardrailed; suspiciously broad hints are ignored and the local dynamic parser is used instead.
 - Natural-language sorting is first-class via `sort_by`, e.g. highest BPM, slowest, most energetic, least aggressive.
-- User-facing result `score` is normalized relative relevance (`1.0` for the top returned result). Raw weighted ranking score is exposed as `raw_score`/breakdown for diagnostics.
+- User-facing result `score` is a calibrated raw relevance score and is not normalized to the top result. Confidence labels, evidence, warnings, and `raw_score`/breakdown are exposed for diagnostics.
 
 ## Product summary
 Build an MVP command-line app where a user can:

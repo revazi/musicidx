@@ -1,6 +1,16 @@
 # MusicIdx
 
-MusicIdx is a local-first music library indexer and search tool. It scans audio folders, stores metadata/features/tags/embeddings in SQLite, and supports metadata, semantic, and natural-language search. A Tauri desktop UI is included for local development.
+MusicIdx is a local-first music library indexer and search tool. It scans audio folders, stores metadata/features/tags/embeddings in SQLite, and supports metadata, semantic, and natural-language search with in-app playback and feedback. A Tauri desktop UI is included for local development.
+
+## Screenshots
+
+Search parameters, LLM hints, local validation, and raw calibrated scoring are visible for debugging:
+
+![MusicIdx search parameters and LLM hints](docs/assets/musicidx-search-parameters-llm.png)
+
+Search results include explanations, confidence labels, playback, reveal actions, and feedback buttons:
+
+![MusicIdx search results with playback and feedback](docs/assets/musicidx-search-results-feedback.png)
 
 ## Status
 
@@ -8,7 +18,7 @@ Implemented:
 
 - SQLite database and migrations
 - recursive audio scanner
-- metadata extraction with `ffprobe`, filename fallback, provenance claims, normalized artist/title fields, and metadata confidence
+- metadata extraction with `ffprobe`, filename fallback, duplicate-based metadata repair, provenance claims, normalized artist/title fields, and metadata confidence
 - SQLite FTS text search
 - Chromaprint fingerprinting with `fpcalc`
 - duplicate / moved-file candidate reporting
@@ -17,15 +27,15 @@ Implemented:
 - versioned track profile JSON with separate semantic `embedding_text`
 - local feature-derived tags and context-fit scores for vague/contextual search
 - optional semantic profile embeddings with `sentence-transformers`
-- hybrid natural-language search
-- optional Gemini/OpenAI intent parsing with local-only ranking
+- hybrid natural-language search with calibrated raw scores, confidence labels, duplicate suppression, explanations, and no/weak-result suggestions
+- optional Gemini/OpenAI intent parsing with local-only ranking and guardrails for overly broad LLM hints
 - search export as M3U / JSON / CSV
-- eval, judging, and feedback commands
-- early cross-platform Tauri desktop UI with cancellable indexing and app-open background auto-indexing
+- eval, judging, feedback, `index-health`, and metadata repair commands
+- early cross-platform Tauri desktop UI with cancellable indexing, app-open background auto-indexing, search-parameter diagnostics, health card, and playback
 
 Not implemented yet:
 
-- packaged Windows/macOS desktop releases with bundled Python sidecar
+- signed/notarized packaged Windows/macOS desktop releases
 - permanent background daemon indexing
 
 ## Local-first defaults
@@ -125,9 +135,11 @@ uv sync --extra dev --extra semantic
 # Local Essentia ML tag support
 uv sync --extra dev --extra ml
 
-# Everything
+# Everything, if the current platform has compatible Essentia wheels
 uv sync --extra dev --extra semantic --extra ml
 ```
+
+If `essentia-tensorflow` wheels are unavailable for your Python/platform, use `--extra semantic` without `--extra ml`; search, embeddings, metadata repair, health checks, and the desktop UI still work.
 
 Equivalent `pip` setup:
 
@@ -150,16 +162,20 @@ npm install
 Start the Tauri app using the repo-local CLI through `uv`:
 
 ```bash
+MUSICIDX_DB_PATH="$PWD/musicidx.sqlite" \
+MUSICIDX_MODELS_PATH="$PWD/.musicidx-models" \
 MUSICIDX_CLI_PATH=uv \
-MUSICIDX_CLI_PREFIX_ARGS="run --extra semantic --extra ml musicidx" \
+MUSICIDX_CLI_PREFIX_ARGS="run --extra semantic musicidx" \
 npm run tauri:dev
 ```
 
 Windows PowerShell:
 
 ```powershell
+$env:MUSICIDX_DB_PATH = "$PWD/musicidx.sqlite"
+$env:MUSICIDX_MODELS_PATH = "$PWD/.musicidx-models"
 $env:MUSICIDX_CLI_PATH = "uv"
-$env:MUSICIDX_CLI_PREFIX_ARGS = "run --extra semantic --extra ml musicidx"
+$env:MUSICIDX_CLI_PREFIX_ARGS = "run --extra semantic musicidx"
 npm run tauri:dev
 ```
 
@@ -181,7 +197,7 @@ In the app, open **Settings** and check:
 ```text
 Working directory: repo/library directory
 CLI path:          uv, or musicidx if installed globally
-CLI prefix args:   run musicidx, or run --extra semantic --extra ml musicidx
+CLI prefix args:   run musicidx, or run --extra semantic musicidx
 Music folder:      folder to index
 DB path:           optional; defaults to ./musicidx.sqlite
 Models path:       optional; defaults to ./.musicidx-models
@@ -238,7 +254,6 @@ Notes:
 - `repair-metadata` persistently fills missing title/artist from filename patterns and matching duplicate/alternate tracks.
 - `rebuild-profiles` regenerates profile text/JSON/embedding text after metadata, feature, tag, or context changes.
 - Avoid `embed --refresh` unless you intentionally want to recompute embeddings.
-- See [`.agents/optimisation.md`](.agents/optimisation.md) for the optimisation plan.
 
 ## Common CLI commands
 
@@ -253,7 +268,7 @@ musicidx index-health --json
 musicidx --help
 ```
 
-Indexing JSON commands include runtime diagnostics such as `duration_sec`, `peak_memory_mb`, and child-process peak memory where available.
+Indexing JSON commands include runtime diagnostics such as `duration_sec`, `peak_memory_mb`, and child-process peak memory where available. After repairing metadata or rebuilding derived/profile state, run `rebuild-profiles` and `embed` so semantic search uses current materialized text.
 
 Indexing:
 
@@ -343,7 +358,7 @@ export OPENAI_API_KEY=...
 musicidx search "warm acoustic morning" --llm --llm-provider openai
 ```
 
-When `--llm` is used, MusicIdx sends the query and an aggregate library profile to the selected provider for intent parsing. It does not send audio files or full track lists.
+When `--llm` is used, MusicIdx sends the query and an aggregate library profile to the selected provider for intent parsing. It does not send audio files or full track lists. LLM hints are validated before they affect ranking; suspiciously broad outputs are ignored and the local dynamic parser is used instead.
 
 ## JSON contracts
 

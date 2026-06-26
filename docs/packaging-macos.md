@@ -6,7 +6,7 @@ The all-in-one bundle includes:
 
 - the Tauri desktop app
 - a PyInstaller-built `musicidx` Python CLI backend
-- installed Python dependencies, including semantic/ML extras
+- installed Python dependencies, including semantic search support and optional ML extras when compatible wheels are available
 - local `.musicidx-models` files
 - `ffmpeg`, `ffprobe`, and `fpcalc`
 - best-effort bundled Homebrew dylib dependencies for `ffmpeg`/`ffprobe`/`fpcalc`
@@ -47,7 +47,7 @@ Make sure models exist locally:
 .musicidx-models/all-MiniLM-L6-v2
 ```
 
-If Intel packaging fails because a newer `essentia-tensorflow` dev build only has `cp314` wheels, temporarily pin the ML extra locally to a CPython 3.11-compatible build before packaging, for example `essentia-tensorflow==2.1b6.dev1389`.
+If Intel packaging fails because a newer `essentia-tensorflow` dev build only has incompatible wheels, package with semantic support first and omit the ML extra, or temporarily pin the ML extra locally to a CPython-compatible build before packaging. Search, metadata repair, embeddings, health checks, and desktop playback do not require the ML extra.
 
 ## Build
 
@@ -120,5 +120,7 @@ For public distribution, add Apple Developer signing and notarization later.
 ## Notes
 
 The script bundles Homebrew `ffmpeg`/`ffprobe`/`fpcalc` dylib dependencies using `otool` and `install_name_tool`. This is best-effort and should be tested on a clean Mac account/machine before sharing widely.
+
+Before sharing an installer, run `musicidx index-health --json` inside the packaged app flow or with the same DB/model paths to confirm DB/model separation, profile v2 coverage, current embeddings, context-fit coverage, and failed/quarantined track warnings.
 
 If the bundled audio helper binaries fail on the target Mac, rebuild using known self-contained/static `ffmpeg`, `ffprobe`, and `fpcalc` binaries via `MUSICIDX_FFMPEG_SOURCE`, `MUSICIDX_FFPROBE_SOURCE`, and `MUSICIDX_FPCALC_SOURCE`.

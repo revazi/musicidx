@@ -24,20 +24,20 @@ The LLM should not be responsible for listening to or analyzing raw audio. It sh
 
 ---
 
-## Current implementation status — 2026-06-17
+## Current implementation status — 2026-06-25
 
 This document began as a phased plan; the current implementation is ahead of several early-phase assumptions.
 
 Implemented now:
 
-- Python/Typer CLI with SQLite/FTS5, scanner, metadata, fingerprints, full-track chunked audio features, Essentia tags, profile text, semantic embeddings, hybrid search, export, eval, feedback, missing-track handling, and diagnostics.
-- Tauri desktop app over the CLI/database with settings, indexing, search, feedback, in-app playback, missing-track actions, and app-open background auto-indexing.
+- Python/Typer CLI with SQLite/FTS5, scanner, metadata, metadata repair, fingerprints, full-track chunked audio features, Essentia tags, profile text, semantic embeddings, hybrid search, export, eval, feedback, missing-track handling, index health, and diagnostics.
+- Tauri desktop app over the CLI/database with settings, indexing, search, feedback, in-app playback, missing-track actions, index health, search diagnostics, suggestions, and app-open background auto-indexing.
 - Background auto-indexing is app-open polling, not a daemon. It marks missing/root-missing state and runs derived indexing for added/modified files.
 - Basic audio analysis defaults to full-track chunked mode. Do **not** use quick/first-120s analysis automatically; `--quick` is only an explicit CLI option.
 - Semantic search uses sentence-transformers profile-text embeddings and participates in hybrid ranking when `semantic_candidate_count > 0` and `semantic_error` is null.
-- Optional LLM intent parsing uses Gemini/OpenAI. The prompt must always try to produce usable music intent for vague/slang/conversational input unless the user explicitly asks not to search.
+- Optional LLM intent parsing uses Gemini/OpenAI. LLM hints are validated by guardrails before affecting local ranking; broad/suspicious hints fall back to dynamic local parsing.
 - Natural-language sort intent is structured through `sort_by` and supports feature sorting such as highest BPM, slowest, most energetic, least aggressive, most danceable, brightest, and darkest.
-- User-facing result `score` is normalized relative relevance for the returned result set; raw weighted ranking score is exposed separately as `raw_score`/breakdown.
+- User-facing result `score` is a calibrated raw relevance score, not normalized to the top result. `raw_score`, confidence labels, evidence, warnings, and breakdowns are exposed for diagnostics.
 
 ---
 
@@ -1012,8 +1012,8 @@ Produce useful ranked results.
 3. Score each candidate with semantic/tag/feature/text/feedback components.
 4. Filter weak fallback candidates; subjective queries prefer tag/text/semantic evidence when available.
 5. Apply explicit sort intent if requested, otherwise apply artist diversity.
-6. Return top N with normalized user-facing relevance scores.
-7. Explain why each track matched.
+6. Return top N with calibrated raw relevance scores, confidence labels, and warnings.
+7. Explain why each track matched, including semantic-only/low-confidence cases.
 ```
 
 ## Ranking Formula
@@ -1021,19 +1021,18 @@ Produce useful ranked results.
 Start with configurable weights:
 
 ```text
-raw_score =
+weighted_score =
     semantic_weight * semantic_score
   + tag_weight      * tag_score
+  + context_weight  * context_score
   + feature_weight  * feature_score
   + text_weight     * text_score
+  + metadata_weight * metadata_score
   + feedback_weight * feedback_score
 
-User-facing result.score is normalized relative relevance:
-
-display_score = raw_score / top_raw_score
-
-The top returned result therefore displays as 1.0 while raw_score remains available
-for diagnostics.
+User-facing result.score is calibrated by dividing the weighted score by the active
+weight budget. It is not normalized to the top returned result. `raw_score`, score
+components, confidence, evidence, and warnings remain available for diagnostics.
 ```
 
 ## Feature Scoring
@@ -1746,7 +1745,7 @@ Requirements:
   track_tags
   audio_features
   optional embeddings if present
-- Rank using weighted hybrid raw score, then expose normalized relative relevance as user-facing score.
+- Rank using weighted hybrid score and expose calibrated raw relevance as user-facing score; do not normalize the top result to 1.0.
 - Support structured sort_by for natural-language sorting such as highest BPM.
 - Add --limit, --json, --explain, --format table/json/m3u.
 - Enforce diversity:

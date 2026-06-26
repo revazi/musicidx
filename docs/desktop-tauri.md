@@ -45,7 +45,7 @@ If you want the desktop app to call the repo-local CLI through `uv`, use:
 
 ```bash
 MUSICIDX_CLI_PATH=uv \
-MUSICIDX_CLI_PREFIX_ARGS="run musicidx" \
+MUSICIDX_CLI_PREFIX_ARGS="run --extra semantic musicidx" \
 npm run tauri:dev
 ```
 
@@ -53,7 +53,7 @@ On Windows PowerShell:
 
 ```powershell
 $env:MUSICIDX_CLI_PATH = "uv"
-$env:MUSICIDX_CLI_PREFIX_ARGS = "run musicidx"
+$env:MUSICIDX_CLI_PREFIX_ARGS = "run --extra semantic musicidx"
 npm run tauri:dev
 ```
 
@@ -84,7 +84,7 @@ The Tauri UI can:
 - mark removed files missing immediately without launching heavy derived-indexing steps
 - handle a previously indexed music folder disappearing by marking its active tracks missing instead of crashing the watcher
 - refresh derived metadata/fingerprints/features/tags/profiles/embeddings when an existing file is modified
-- keep indexing setup and individual scan/metadata/fingerprint/basic/tag/derived/profile/embed actions in Settings
+- keep indexing setup and individual scan/metadata/repair-metadata/fingerprint/basic/tag/derived/profile/embed actions in Settings
 - show manual and background pipeline progress by step, runtime, counts, metadata repairs, derived tag/context counts, profile schema version, and memory diagnostics in a floating progress panel with a Cancel button
 - show an Index health card in Settings with coverage for audio features, derived tags, context-fit scores, profile v2, and embedding freshness
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
@@ -98,9 +98,10 @@ The Tauri UI can:
 - reset failed/quarantined tracks for retry from advanced indexing actions
 - stream command stdout/stderr into an expandable live/raw output panel
 - parse natural-language intent
-- run concise JSON search with explanations
+- run concise JSON search with explanations, calibrated raw scores, confidence labels, duplicate suppression, no/weak-result suggestions, and a visible search-parameters panel
 - render search result cards with in-app audio playback via Tauri asset protocol and a Show action for revealing tracks in the file manager
 - save good/bad/neutral feedback from result cards
+- show LLM-provided hints separately from the final merged local intent when `--llm` is used
 - run the starter eval set from advanced indexing actions
 - export M3U playlists from a floating bottom-right icon button
 - store desktop-only settings in browser local storage
@@ -130,7 +131,7 @@ For repo-local development, this is usually enough:
 
 ```text
 CLI path:        uv
-CLI prefix args: run musicidx
+CLI prefix args: run --extra semantic musicidx
 Working dir:    /path/to/musicidx
 ```
 
@@ -139,7 +140,7 @@ Working dir:    /path/to/musicidx
 This is still an early wrapper scaffold.
 
 - macOS all-in-one packaging scaffolding exists in `scripts/build-macos-all-in-one.sh`; universal binaries/signing/notarization are not implemented yet.
-- App-data DB/model locations are not implemented yet.
+- Packaged app-data DB/model path handling needs more end-to-end release testing.
 - Long-running CLI commands stream output and can be cancelled, but there is no per-track structured progress percentage yet.
 - Feedback buttons call the CLI one rating at a time; batch feedback is not implemented yet.
 - Settings are local to the webview/localStorage and not a formal app config file yet.

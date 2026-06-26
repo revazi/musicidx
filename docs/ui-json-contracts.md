@@ -17,6 +17,7 @@ This document captures the JSON-oriented CLI commands that the cross-platform de
 ```bash
 musicidx doctor --json
 musicidx db-info --json
+musicidx index-health --json
 musicidx models path --json
 musicidx models list --json
 ```
@@ -26,22 +27,26 @@ Expected use:
 - show setup status
 - detect missing `ffprobe` / `fpcalc`
 - detect local model availability
-- show DB path and indexed counts
+- show DB path, indexed counts, health/readiness warnings, stale embeddings, profile v2 coverage, and recommended fixes
 
 ### Indexing workflow
 
 ```bash
 musicidx scan <folder> --json
 musicidx metadata --missing-only --json
+musicidx repair-metadata --from-filename --from-duplicates --missing-only --json
 musicidx fingerprint --missing-only --json
 musicidx analyze-basic --chunked --chunk-sec auto --workers auto --resource-profile auto --json
 musicidx analyze-tags --missing-only --workers auto --resource-profile auto --subprocess-batches --batch-size auto --json
+musicidx rebuild-derived --json
+musicidx rebuild-profiles --json
 musicidx embed --batch-size auto --resource-profile auto --json
 ```
 
 Expected use:
 
 - run each indexing step from a UI action or setup wizard
+- run `repair-metadata` after `metadata` to persist filename/duplicate-based title/artist repairs before profiles/embeddings are rebuilt
 - use adaptive defaults for one-click indexing; `auto` scales by RAM, and desktop background auto-indexing defaults to the Balanced profile unless changed in Settings
 - use `scan <folder> --json` for app-open background polling
 - run derived indexing steps when `added + modified > 0`; `missing > 0` only needs the scan result to update library state
@@ -62,6 +67,8 @@ Common indexing diagnostics fields:
 | `diagnostics.peak_memory_source` | Platform API used for memory measurement. |
 | `chunked` / `chunk_sec` | Basic-analysis chunking settings when `analyze-basic --chunked` is used. |
 | `root_missing` | Scan-only flag. `true` means the scanned root was known from a previous scan but is currently unavailable, so active tracks under it were marked missing. |
+| `repairs` | Metadata-repair details when `repair-metadata` changes/proposes fields. |
+| `schema_version` | Profile schema version when rebuilding profiles. |
 
 ### Missing and failed tracks
 
@@ -109,6 +116,7 @@ Expected use:
 
 - preview parsed intent
 - debug local vs LLM-assisted interpretation
+- show `llm_error` when cloud parsing fails or LLM hints are rejected by guardrails
 
 ### Search results
 
