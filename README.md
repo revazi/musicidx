@@ -37,6 +37,9 @@ Not implemented yet:
 
 - signed/notarized packaged Windows/macOS desktop releases
 - permanent background daemon indexing
+- MCP server support
+- Spotify/SoundCloud provider-native search and playlist saving
+- optional RAG/LLM playlist curation layer
 
 ## Local-first defaults
 
@@ -359,6 +362,33 @@ musicidx search "warm acoustic morning" --llm --llm-provider openai
 ```
 
 When `--llm` is used, MusicIdx sends the query and an aggregate library profile to the selected provider for intent parsing. It does not send audio files or full track lists. LLM hints are validated before they affect ranking; suspiciously broad outputs are ignored and the local dynamic parser is used instead.
+
+## Future MCP and streaming integrations
+
+Planned MCP support should start with safe, read-only local MusicIdx tools for search, index health, and track details. Local paths should stay hidden by default, and MCP should be optional.
+
+A later streaming integration should search provider catalogs directly, not only export local results:
+
+```text
+natural-language query
+→ MusicIdx-style intent parsing/query expansion
+→ Spotify/SoundCloud provider API search
+→ local reranking with score/confidence/explanations
+→ playlist preview
+→ explicit confirmed save to Spotify/SoundCloud playlist
+```
+
+Local-to-provider matching can be added as an optional path for exporting local MusicIdx search results, but provider-native search should be the primary Spotify/SoundCloud workflow.
+
+RAG is not required for core search/export. If added later, it should be an optional curation layer after deterministic retrieval/ranking, for tasks such as query expansion, playlist refinement, ordering, and friendly explanations. It must use redacted result metadata only; do not send local paths, DB paths, API keys, tokens, raw audio, or secrets to an LLM.
+
+Streaming credentials must come from environment variables, local config, or keychain/token storage. Do not pass API keys or OAuth tokens through MCP tool arguments. Playlist writes should require an explicit server flag and `confirm=true`, with private playlists as the safe default where supported.
+
+Implementation planning notes:
+
+- [MCP server plan](.agents/musicidx_mcp_server_plan_for_pi.md)
+- [MCP streaming integrations plan](.agents/musicidx_mcp_streaming_integrations_plan_for_pi.md)
+- [Installation/models plan](.agents/musicidx_installation_and_models_plan_for_pi.md)
 
 ## JSON contracts
 
