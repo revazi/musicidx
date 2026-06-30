@@ -6,7 +6,8 @@ The all-in-one bundle includes:
 
 - the Tauri desktop app
 - a PyInstaller-built `musicidx` Python CLI backend
-- installed Python dependencies, including semantic search support and optional ML extras when compatible wheels are available
+- installed Python dependencies with semantic search support by default
+- optional ML extras only when explicitly requested and compatible wheels are available
 - local `.musicidx-models` files
 - `ffmpeg`, `ffprobe`, and `fpcalc`
 - best-effort bundled Homebrew dylib dependencies for `ffmpeg`/`ffprobe`/`fpcalc`
@@ -39,6 +40,19 @@ Also install:
 - Rust/Cargo
 - Node/npm
 - `uv`
+- a framework/shared-library Python 3.11 for PyInstaller, for example Homebrew `python@3.11`
+
+Avoid pyenv Pythons built without `--enable-shared`/framework support for packaging; PyInstaller will fail with:
+
+```text
+Python was built without a shared library, which is required by PyInstaller.
+```
+
+The packaging script uses a dedicated `build/package-venv` and prefers `/opt/homebrew/bin/python3.11` or `/usr/local/bin/python3.11` when present. Override if needed:
+
+```bash
+MUSICIDX_PACKAGE_PYTHON=/path/to/python3.11 npm --prefix desktop run package:mac:all-in-one
+```
 
 Make sure models exist locally:
 
@@ -47,7 +61,15 @@ Make sure models exist locally:
 .musicidx-models/all-MiniLM-L6-v2
 ```
 
-If Intel packaging fails because a newer `essentia-tensorflow` dev build only has incompatible wheels, package with semantic support first and omit the ML extra, or temporarily pin the ML extra locally to a CPython-compatible build before packaging. Search, metadata repair, embeddings, health checks, and desktop playback do not require the ML extra.
+The packaging scripts build with semantic support only by default. This avoids fragile `essentia-tensorflow` wheel availability issues. Search, metadata repair, embeddings, health checks, and desktop playback do not require the ML extra.
+
+To build the full bundle with local Essentia ML tagging included, use:
+
+```bash
+MUSICIDX_PACKAGE_WITH_ML=1 npm --prefix desktop run package:mac:all-in-one
+```
+
+This requires compatible `essentia-tensorflow` wheels for the build Python and architecture. The project pins the ML extra to `essentia-tensorflow==2.1b6.dev1389` because newer `2.1b6.dev1438` wheels are currently CPython 3.14-only on PyPI.
 
 ## Build
 

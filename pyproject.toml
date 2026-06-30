@@ -28,7 +28,9 @@ dev = [
   "ruff>=0.4",
 ]
 ml = [
-  "essentia-tensorflow>=2.1b6.dev1389,<2.2",
+  # Newer 2.1b6.dev1438 wheels are currently CPython 3.14-only on PyPI.
+  # Keep the ML extra pinned to the CPython 3.11-compatible build used for packaging.
+  "essentia-tensorflow==2.1b6.dev1389",
 ]
 semantic = [
   "sentence-transformers>=3.0",

@@ -9,6 +9,23 @@ MODELS_SOURCE="${MUSICIDX_MODELS_SOURCE:-$ROOT_DIR/.musicidx-models}"
 PYINSTALLER_WORK_DIR="$ROOT_DIR/build/pyinstaller"
 PYINSTALLER_SPEC_DIR="$ROOT_DIR/build/pyinstaller-spec"
 COPIED_DYLIB_MARKER_DIR="$ROOT_DIR/build/copied-dylibs"
+PACKAGE_WITH_ML="${MUSICIDX_PACKAGE_WITH_ML:-0}"
+PACKAGE_VENV="${MUSICIDX_PACKAGE_VENV:-$ROOT_DIR/build/package-venv}"
+if [[ -n "${MUSICIDX_PACKAGE_PYTHON:-}" ]]; then
+  PACKAGE_PYTHON="$MUSICIDX_PACKAGE_PYTHON"
+elif [[ -x /opt/homebrew/bin/python3.11 ]]; then
+  PACKAGE_PYTHON="/opt/homebrew/bin/python3.11"
+elif [[ -x /usr/local/bin/python3.11 ]]; then
+  PACKAGE_PYTHON="/usr/local/bin/python3.11"
+else
+  PACKAGE_PYTHON="3.11"
+fi
+UV_EXTRA_ARGS=(--python "$PACKAGE_PYTHON" --extra semantic)
+PYINSTALLER_ML_COLLECT_ARGS=()
+if [[ "$PACKAGE_WITH_ML" == "1" || "$PACKAGE_WITH_ML" == "true" || "$PACKAGE_WITH_ML" == "yes" ]]; then
+  UV_EXTRA_ARGS+=(--extra ml)
+  PYINSTALLER_ML_COLLECT_ARGS+=(--collect-all essentia)
+fi
 
 is_system_dylib() {
   local dep="$1"
@@ -165,9 +182,15 @@ find "$RESOURCES_DIR/lib" -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
 rm -rf "$PYINSTALLER_WORK_DIR" "$PYINSTALLER_SPEC_DIR" "$COPIED_DYLIB_MARKER_DIR"
 
 printf '\n==> Building Python CLI sidecar with PyInstaller\n'
-uv run \
-  --extra semantic \
-  --extra ml \
+if [[ ${#PYINSTALLER_ML_COLLECT_ARGS[@]} -gt 0 ]]; then
+  printf '    Python extras: semantic + ml\n'
+else
+  printf '    Python extras: semantic\n'
+fi
+printf '    Package Python: %s\n' "$PACKAGE_PYTHON"
+printf '    Package venv:   %s\n' "$PACKAGE_VENV"
+UV_PROJECT_ENVIRONMENT="$PACKAGE_VENV" uv run \
+  "${UV_EXTRA_ARGS[@]}" \
   --with pyinstaller \
   pyinstaller \
   --noconfirm \
@@ -184,12 +207,13 @@ uv run \
   --collect-all numpy \
   --collect-all scipy \
   --collect-all soundfile \
+  --collect-all _soundfile_data \
   --collect-all librosa \
   --collect-all sklearn \
   --collect-all torch \
   --collect-all transformers \
   --collect-all sentence_transformers \
-  --collect-all essentia \
+  "${PYINSTALLER_ML_COLLECT_ARGS[@]}" \
   "$ROOT_DIR/packaging/musicidx_cli_entry.py"
 
 chmod +x "$RESOURCES_DIR/musicidx-bin/musicidx/musicidx"
