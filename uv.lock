@@ -626,6 +626,7 @@ dependencies = [
     { name = "llvmlite", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "numba", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "numpy" },
+    { name = "pyacoustid" },
     { name = "pyyaml" },
     { name = "rich" },
     { name = "soundfile" },
@@ -653,6 +654,7 @@ requires-dist = [
     { name = "llvmlite", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = "==0.45.1" },
     { name = "numba", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = "==0.62.1" },
     { name = "numpy", specifier = ">=1.26,<2" },
+    { name = "pyacoustid", specifier = ">=1.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0" },
@@ -967,6 +969,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/43/85ef45e8b36c6a48546af7b266592dc32d7f67837a6514d111bced6d7d75/pooch-1.9.0.tar.gz", hash = "sha256:de46729579b9857ffd3e741987a2f6d5e0e03219892c167c6578c0091fb511ed", size = 61788, upload-time = "2026-01-30T19:15:09.649Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/2d/d4bf65e47cea8ff2c794a600c4fd1273a7902f268757c531e0ee9f18aa58/pooch-1.9.0-py3-none-any.whl", hash = "sha256:f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b", size = 67175, upload-time = "2026-01-30T19:15:08.36Z" },
+]
+
+[[package]]
+name = "pyacoustid"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "audioread" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/77/95/fb31647f36c33097d3fbfcb1f145977b52d841382f5e5b1f72be1f76b659/pyacoustid-1.3.1.tar.gz", hash = "sha256:bb0ecae40109c0aa80f709e33c66c83ec36b2fd84658f9fad056a34538f79e8a", size = 16424, upload-time = "2026-04-09T18:05:59.429Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/87/23e9467c89f7b013481cfc0991af27cc4bb267e4524f8d78cf29d8b8ded7/pyacoustid-1.3.1-py3-none-any.whl", hash = "sha256:4436732937ac40e4b2fec4808fc81934c0e07ad9e3f0ef5f2b225517c99bb1e4", size = 13491, upload-time = "2026-04-09T18:05:58.18Z" },
 ]
 
 [[package]]

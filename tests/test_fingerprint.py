@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import array
 from types import SimpleNamespace
+
+import chromaprint
 
 from musicidx.db import connect_db, init_db
 from musicidx.fingerprint import (
@@ -43,9 +46,11 @@ def test_process_fingerprints_updates_track(monkeypatch, tmp_path):
         init_db(conn)
         _insert_track(conn, "track-1", track_path)
 
+        encoded = _encoded_test_fingerprint()
+
         def fake_fingerprint_path(path):
             assert path == track_path
-            return TrackFingerprint(chromaprint="fp-1", duration_sec=98.0)
+            return TrackFingerprint(chromaprint=encoded, duration_sec=98.0)
 
         monkeypatch.setattr("musicidx.fingerprint.fingerprint_path", fake_fingerprint_path)
         summary = process_fingerprints(conn)
@@ -54,10 +59,17 @@ def test_process_fingerprints_updates_track(monkeypatch, tmp_path):
         assert summary.updated == 1
         assert summary.errors == 0
         row = conn.execute(
-            "SELECT chromaprint, fingerprint_duration FROM tracks WHERE id = 'track-1'"
+            """
+            SELECT chromaprint, fingerprint_duration, chromaprint_algorithm,
+                   chromaprint_frames, chromaprint_frame_count
+            FROM tracks WHERE id = 'track-1'
+            """
         ).fetchone()
-        assert row["chromaprint"] == "fp-1"
+        assert row["chromaprint"] == encoded
         assert row["fingerprint_duration"] == 98.0
+        assert row["chromaprint_algorithm"] == 1
+        assert row["chromaprint_frames"] is not None
+        assert row["chromaprint_frame_count"] == 4
     finally:
         conn.close()
 
@@ -111,6 +123,11 @@ def test_find_duplicate_groups_reports_audio_duplicates_and_possible_moves(tmp_p
         )
     finally:
         conn.close()
+
+
+def _encoded_test_fingerprint() -> str:
+    payload = array.array("I", [1, 2, 3, 4])
+    return chromaprint.encode_fingerprint(payload, 1).decode("ascii")
 
 
 def _insert_track(

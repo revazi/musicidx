@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from musicidx.chromaprint_frames import decoded_storage_values
 from musicidx.config import FPCALC_PATH_ENV_VAR, resolve_executable
 from musicidx.db import utc_now
 from musicidx.failures import clear_track_failure, record_track_error
@@ -157,13 +158,27 @@ def save_track_fingerprint(
     fingerprint: TrackFingerprint,
 ) -> None:
     """Persist fingerprint information for one track."""
+    algorithm, frames_blob, frame_count = decoded_storage_values(fingerprint.chromaprint)
     conn.execute(
         """
         UPDATE tracks
-        SET chromaprint = ?, fingerprint_duration = ?, indexed_at = ?
+        SET chromaprint = ?,
+            fingerprint_duration = ?,
+            chromaprint_algorithm = ?,
+            chromaprint_frames = ?,
+            chromaprint_frame_count = ?,
+            indexed_at = ?
         WHERE id = ?
         """,
-        (fingerprint.chromaprint, fingerprint.duration_sec, utc_now(), track_id),
+        (
+            fingerprint.chromaprint,
+            fingerprint.duration_sec,
+            algorithm,
+            frames_blob,
+            frame_count,
+            utc_now(),
+            track_id,
+        ),
     )
     clear_track_failure(conn, track_id)
 
@@ -214,7 +229,7 @@ def _select_tracks_for_fingerprinting(
         clauses.append("id = ?")
         params.append(track_id)
     if missing_only:
-        clauses.append("chromaprint IS NULL")
+        clauses.append("(chromaprint IS NULL OR chromaprint_frames IS NULL)")
 
     return conn.execute(
         f"SELECT id, path FROM tracks WHERE {' AND '.join(clauses)} ORDER BY path",

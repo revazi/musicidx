@@ -228,6 +228,9 @@ def _clear_stale_track_outputs(conn: sqlite3.Connection, track_id: str) -> None:
         UPDATE tracks
         SET chromaprint = NULL,
             fingerprint_duration = NULL,
+            chromaprint_algorithm = NULL,
+            chromaprint_frames = NULL,
+            chromaprint_frame_count = NULL,
             title = NULL,
             artist = NULL,
             album = NULL,
