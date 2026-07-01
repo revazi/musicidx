@@ -83,28 +83,85 @@ TYPO_SUGGESTION_TERMS = {
     "workout",
 }
 
-FALLBACK_SEARCH_EXAMPLES = [
+SEARCH_TYPE_EXAMPLES = [
     {
+        "type": "mood",
+        "label": "Mood",
         "query": "I'm in love",
         "reason": "romantic/love mood search",
     },
     {
+        "type": "mood",
+        "label": "Mood",
         "query": "romantic",
         "reason": "broad romantic mood search",
     },
     {
+        "type": "metadata_text",
+        "label": "Title/lyrics-like text",
         "query": "love songs",
         "reason": "direct love-song intent",
     },
     {
+        "type": "context",
+        "label": "Context",
         "query": "chill bar",
         "reason": "context plus mood search",
     },
     {
+        "type": "occasion",
+        "label": "Occasion",
         "query": "wedding reception",
         "reason": "occasion/event search",
     },
+    {
+        "type": "feature_sort",
+        "label": "Feature sort",
+        "query": "highest BPM techno",
+        "reason": "sort matching style/genre candidates by perceived BPM",
+    },
+    {
+        "type": "feature_filter",
+        "label": "Feature filter",
+        "query": "low energy background music",
+        "reason": "filter/rank by audio feature constraints",
+    },
+    {
+        "type": "vocals",
+        "label": "Vocals/instrumental",
+        "query": "no vocals background music",
+        "reason": "find instrumental/background-friendly tracks",
+    },
+    {
+        "type": "negation",
+        "label": "Negation",
+        "query": "dark ambient but not aggressive",
+        "reason": "combine desired mood with explicit exclusions",
+    },
+    {
+        "type": "danceability",
+        "label": "Danceability",
+        "query": "most danceable disco",
+        "reason": "sort matching dance/disco tracks by danceability",
+    },
+    {
+        "type": "context",
+        "label": "Context",
+        "query": "warm lounge bar music",
+        "reason": "multi-word contextual vibe search",
+    },
+    {
+        "type": "closest_tracks",
+        "label": "Closest tracks / remixes",
+        "query": None,
+        "reason": (
+            "Search for a seed track, then click Matches to inspect "
+            "decoded-fingerprint soundwave candidates."
+        ),
+    },
 ]
+
+FALLBACK_SEARCH_EXAMPLES = [item for item in SEARCH_TYPE_EXAMPLES if item.get("query")]
 
 TYPO_SUGGESTION_SKIP_TERMS = {
     "aggression",
@@ -258,8 +315,8 @@ def search_music(
     ranked = _rank_by_mode(scored_results, intent, mode=mode)
     filtered = _filter_weak_results(ranked, intent, mode=mode)
     sorted_results = _apply_explicit_sort(filtered, intent)
-    deduplicated = _suppress_near_duplicates(sorted_results)
-    diversified = deduplicated if intent.sort_by else _apply_diversity(deduplicated, intent)
+    deduplicated = sorted_results
+    diversified = deduplicated
     limited_results = _with_saved_feedback(
         conn,
         diversified[: intent.limit],
@@ -290,12 +347,15 @@ def search_music(
         "weak_top_result_score": WEAK_TOP_RESULT_SCORE,
         "minimum_semantic_only_relevance": MIN_SEMANTIC_ONLY_RELEVANCE,
         "score_warnings": _score_warnings(top_raw_score, limited_results),
+        "duplicate_suppression_enabled": False,
         "duplicate_suppressed_count": max(0, len(sorted_results) - len(deduplicated)),
+        "diversity_suppression_enabled": False,
         "scored_evidence_source_counts": _result_evidence_source_counts(scored_results),
         "filtered_evidence_source_counts": _result_evidence_source_counts(filtered),
         "limited_evidence_source_counts": _result_evidence_source_counts(limited_results),
         "result_evidence_source_counts": _result_evidence_source_counts(limited_results),
         "suggested_queries": suggested_queries,
+        "search_type_examples": _search_type_examples(),
         "result_notice": _result_notice(limited_results, top_raw_score, suggested_queries),
     }
     return SearchResponse(
@@ -585,7 +645,7 @@ def _suggested_queries(
             continue
         seen.add(key)
         output.append(suggestion)
-    return output[:5]
+    return output[:10]
 
 
 def _should_add_fallback_suggestions(
@@ -607,11 +667,17 @@ def _fallback_search_suggestions() -> list[dict[str, Any]]:
     return [
         {
             "kind": "example",
+            "type": item.get("type"),
+            "label": item.get("label"),
             "query": item["query"],
             "reason": item["reason"],
         }
         for item in FALLBACK_SEARCH_EXAMPLES
     ]
+
+
+def _search_type_examples() -> list[dict[str, Any]]:
+    return [dict(item) for item in SEARCH_TYPE_EXAMPLES]
 
 
 def _suggestion_key(query: str) -> str:

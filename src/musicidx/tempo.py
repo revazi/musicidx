@@ -19,9 +19,26 @@ HIGH_TEMPO_STYLE_TERMS = {
     "drum&bass",
     "gabber",
     "happy hardcore",
-    "hardcore",
+    "hard techno",
+    "hardcore techno",
+    "hardstyle",
     "jungle",
     "speedcore",
+}
+
+DOUBLE_TIME_PRONE_STYLE_TERMS = {
+    "boom bap",
+    "conscious",
+    "downtempo",
+    "g funk",
+    "gangsta",
+    "hip hop",
+    "hiphop",
+    "instrumental hip hop",
+    "rap",
+    "screw",
+    "thug rap",
+    "trip hop",
 }
 
 
@@ -41,7 +58,10 @@ def perceived_tempo_bpm(
     if value is None or value <= 0:
         return None
 
-    if value >= 168.0 and not _has_high_tempo_style(descriptors):
+    high_tempo_style = _has_high_tempo_style(descriptors)
+    if value >= 168.0 and not high_tempo_style:
+        value = value / 2.0
+    elif value >= 145.0 and not high_tempo_style and _has_double_time_prone_style(descriptors):
         value = value / 2.0
     elif value < 62.0:
         value = value * 2.0
@@ -83,12 +103,29 @@ def tempo_descriptors_from_metadata_and_tags(
 
 
 def _has_high_tempo_style(descriptors: Iterable[str | None] | None) -> bool:
+    compact = _descriptor_text(descriptors)
+    return any(_phrase_present(compact, term) for term in HIGH_TEMPO_STYLE_TERMS)
+
+
+def _has_double_time_prone_style(descriptors: Iterable[str | None] | None) -> bool:
+    compact = _descriptor_text(descriptors)
+    return any(_phrase_present(compact, term) for term in DOUBLE_TIME_PRONE_STYLE_TERMS)
+
+
+def _descriptor_text(descriptors: Iterable[str | None] | None) -> str:
     if not descriptors:
-        return False
+        return ""
     text = " ".join(str(item).casefold().replace("---", " ") for item in descriptors if item)
     text = text.replace("&", " and ").replace("-", " ").replace("_", " ")
-    compact = " ".join(text.split())
-    return any(term in compact for term in HIGH_TEMPO_STYLE_TERMS)
+    return " ".join(text.split())
+
+
+def _phrase_present(text: str, phrase: str) -> bool:
+    normalized = phrase.casefold().replace("&", " and ").replace("-", " ").replace("_", " ")
+    normalized = " ".join(normalized.split())
+    if not text or not normalized:
+        return False
+    return f" {normalized} " in f" {text} "
 
 
 def _float_or_none(value: Any) -> float | None:
