@@ -118,6 +118,35 @@ Expected use:
 - debug local vs LLM-assisted interpretation
 - show `llm_error` when cloud parsing fails or LLM hints are rejected by guardrails
 
+### Search taxonomy and plan diagnostics
+
+Optional UI/debug commands:
+
+```bash
+musicidx search-taxonomy --json
+musicidx search-plan "highest BPM techno" --json
+```
+
+`search-taxonomy` exposes the bundled parser taxonomy: feature ranges, contexts, query priors, occasion contexts, stop words, and identity/semantic/LLM policy text.
+
+The `search-plan` payload is wrapped as `{ "db_path": "...", "plan": { ... } }`. The plan is diagnostic and additive; clients should ignore unknown keys.
+
+Important `plan` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | SearchPlan JSON schema version, currently `1`. |
+| `query` / `parser` / `mode` | Original query, parser source, and query mode such as `feature_sort`, `tag_genre`, `context_vibe`, or `metadata_exact`. |
+| `terms.content` / `terms.directives` / `terms.negated` | Parsed content, sort/feature directive, and negated terms. |
+| `entities` | Reserved artist/title/album entity slots; currently empty unless later entity extraction fills them. |
+| `must` / `should` / `avoid` | Deterministic plan clauses, with `source` where available. |
+| `hard_filters` | Non-negotiable plan filters such as missing-track inclusion and required sort feature values. |
+| `sort` | Explicit sort directives. |
+| `semantic.role` | Semantic profile role: primary evidence, supporting, fallback, or tie-breaker. |
+| `llm` | LLM accepted/rejected hints, provider/model when known, errors, and ignored reason. |
+| `diagnostics.candidate_source_plan` | Planned candidate/evidence sources including semantic profile, audio embedding placeholder, fingerprint identity placeholder, and feedback. |
+| `warnings` | Plan-level diagnostics such as rejected LLM hints or missing semantic model. |
+
 ### Search results
 
 Preferred UI search command:
@@ -128,7 +157,7 @@ musicidx search "chill bar" --format json --concise --limit 10 --explain
 
 Important top-level fields:
 
-Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `sort_by`, `score_warnings`, `duplicate_suppressed_count`, `result_notice`, and `suggested_queries`.
+Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, suppresses low-relevance semantic-only fallback results, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `minimum_semantic_only_relevance`, `sort_by`, `score_warnings`, `duplicate_suppressed_count`, `scored_evidence_source_counts`, `filtered_evidence_source_counts`, `limited_evidence_source_counts`, `result_evidence_source_counts`, `result_notice`, and `suggested_queries`.
 
 | Field | Meaning |
 | --- | --- |
@@ -152,10 +181,35 @@ Important result fields:
 | `raw_score` | Same calibrated score, exposed explicitly for clients/debugging. |
 | `confidence` | `high`, `medium`, or `low` based on score strength and evidence type. |
 | `warnings` | Per-result warnings such as `semantic_only` or `weak_score`. |
+| `rank_reason` | Compact deterministic ranking reason with `mode`, `primary`, `summary`, `signals`, top `components`, and optional `sort` detail. |
+| `candidate_evidence` | Compact evidence provenance with `retrieved_by`, per-source scores/details, identity-source availability, and `semantic_only`. |
 | `why` | Human-readable explanations when `--explain` is used, including semantic-only/low-confidence notes. |
 | `saved_feedback_rating` | Latest exact-query judgment for this result: `good`, `bad`, `neutral`, or `null`. |
 | `scores` | Compact score components, including semantic, metadata, tags, features, context, text, and feedback when present. |
 | `matched_tags` | Top matched ML/local tags. |
+
+### Track matching diagnostics
+
+```bash
+musicidx compare-tracks --track-a <id> --track-b <id> --json
+musicidx match-track --track-id <id> --against-library --json
+musicidx eval-matches <match-eval.json> --json
+```
+
+`compare-tracks` returns `{ "db_path": "...", "report": { ... } }`. `match-track` returns `{ "db_path": "...", "track_id": "...", "count": n, "reports": [...] }`.
+
+`match-track` searches against indexed library candidates by default; `--against-library` is an explicit readability/compatibility flag. `eval-matches` loads `{ "matches": [...] }` files and checks expected decisions/evidence/warnings for repeatable MatchReport regressions. `eval/matching_regressions.example.json` shows the expected file shape with placeholder track IDs. See `docs/matching.md` for MatchReport decision policy.
+
+Important `MatchReport` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | MatchReport JSON schema version, currently `1`. |
+| `decision` | Deterministic result such as `exact_duplicate`, `same_recording`, `possible_metadata_match`, `related_version_not_duplicate`, `sound_similar_only`, `no_identity_match`, or `insufficient_evidence`. |
+| `identity_decision` | `same`, `possible`, or `unknown`; only content hash / chromaprint can produce `same`. |
+| `confidence` / `confidence_score` | Human and numeric confidence for the report. |
+| `evidence` | Per-source evidence from `content_hash`, `chromaprint`, `duration`, `artist_title_norm`, `version_conflict`, and optional `audio_embedding`, including source role and match/mismatch/missing/conflict/similar status. |
+| `policy` | Explicit policy: semantic embeddings, audio embeddings, and LLMs are not used for identity. |
 
 ### Evaluation and feedback
 
@@ -168,6 +222,7 @@ musicidx feedback --track-id <id> --query "chill bar" --rating good --json
 Expected use:
 
 - run repeatable search-quality checks before/after ranking changes
+- assert structured intent/ranking diagnostics, including `rank_reason_primary_top` and `must_have_evidence_sources_top`
 - collect local good/bad judgments from users
 - use feedback-aware ranking in later searches
 

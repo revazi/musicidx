@@ -1,0 +1,567 @@
+{
+  "description": "Search regression suite for planning/ranking/sort/LLM diagnostics. This is intentionally library-dependent: use it to compare before/after search changes on the same indexed library.",
+  "queries": [
+    {
+      "id": "feature_sort_high_bpm",
+      "category": "feature_sort",
+      "text": "high bpm",
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "tempo_bpm",
+          "direction": "desc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_highest_bpm",
+      "category": "feature_sort",
+      "text": "highest BPM",
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "tempo_bpm",
+          "direction": "desc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_fast_tempo",
+      "category": "feature_sort",
+      "text": "fast tempo",
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "tempo_bpm",
+          "direction": "desc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_low_bpm",
+      "category": "feature_sort",
+      "text": "lowest BPM",
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "tempo_bpm",
+          "direction": "asc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_highest_bpm_techno",
+      "category": "content_plus_sort",
+      "text": "highest BPM techno",
+      "expected_tags": [
+        "techno"
+      ],
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "must_match_any": [
+          "techno"
+        ],
+        "sort_by": {
+          "field": "tempo_bpm",
+          "direction": "desc"
+        },
+        "top_k": 5,
+        "semantic_role": "tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ],
+        "rank_reason_primary_top": "explicit_sort",
+        "must_have_evidence_sources_top": [
+          "tags",
+          "audio_features"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_high_energy",
+      "category": "feature_sort",
+      "text": "high energy",
+      "expected_tags": [
+        "high energy",
+        "energetic"
+      ],
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "energy",
+          "direction": "desc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_low_energy",
+      "category": "feature_sort",
+      "text": "low energy",
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "energy",
+          "direction": "asc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_most_danceable",
+      "category": "feature_sort",
+      "text": "most danceable tracks",
+      "expected_tags": [
+        "dance",
+        "danceable"
+      ],
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "danceability",
+          "direction": "desc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_least_aggressive",
+      "category": "feature_sort",
+      "text": "least aggressive",
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal"
+      ],
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "aggression",
+          "direction": "asc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "feature_sort_darkest",
+      "category": "feature_sort",
+      "text": "darkest tracks",
+      "expected_tags": [
+        "dark"
+      ],
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "sort_by": {
+          "field": "brightness",
+          "direction": "asc"
+        },
+        "top_k": 10,
+        "semantic_role": "supporting_tie_breaker",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "genre_techno",
+      "category": "tag_genre",
+      "text": "techno",
+      "expected_tags": [
+        "techno",
+        "electronic"
+      ],
+      "expectations": {
+        "expected_mode": "tag_genre",
+        "must_match_any": [
+          "techno"
+        ],
+        "top_k": 5,
+        "semantic_role": "supporting",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "genre_ambient",
+      "category": "tag_genre",
+      "text": "ambient",
+      "expected_tags": [
+        "ambient",
+        "calm",
+        "background"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "party"
+      ],
+      "expectations": {
+        "expected_mode": "tag_genre",
+        "must_match_any": [
+          "ambient"
+        ],
+        "top_k": 5,
+        "semantic_role": "supporting",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "metadata_artist_dire_straits",
+      "category": "metadata_exact",
+      "text": "Dire Straits",
+      "expected_tags": [
+        "dire straits",
+        "rock"
+      ],
+      "expectations": {
+        "must_match_any": [
+          "dire straits"
+        ],
+        "top_k": 5,
+        "expected_mode": "metadata_exact",
+        "semantic_role": "fallback",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ]
+      }
+    },
+    {
+      "id": "metadata_title_walk_of_life",
+      "category": "metadata_exact",
+      "text": "Walk Of Life",
+      "expected_tags": [
+        "walk of life",
+        "dire straits"
+      ],
+      "expectations": {
+        "must_match_any": [
+          "walk of life"
+        ],
+        "top_k": 3,
+        "expected_mode": "metadata_exact",
+        "semantic_role": "fallback",
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ],
+        "rank_reason_primary_top": "metadata_match",
+        "must_have_evidence_sources_top": [
+          "metadata"
+        ]
+      }
+    },
+    {
+      "id": "occasion_wedding_reception",
+      "category": "occasion",
+      "text": "wedding reception",
+      "expected_tags": [
+        "romantic",
+        "happy",
+        "uplifting",
+        "danceable",
+        "soul",
+        "disco"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "dark",
+        "hardcore",
+        "workout"
+      ],
+      "expectations": {
+        "expected_mode": "occasion",
+        "top_k": 10,
+        "semantic_role": "primary_evidence"
+      }
+    },
+    {
+      "id": "occasion_workout",
+      "category": "occasion",
+      "text": "aggressive workout music",
+      "expected_tags": [
+        "aggressive",
+        "energetic",
+        "intense",
+        "workout",
+        "fast"
+      ],
+      "avoid_tags": [
+        "sleep",
+        "ambient",
+        "soft",
+        "calm"
+      ],
+      "expectations": {
+        "expected_mode": "occasion",
+        "top_k": 10,
+        "semantic_role": "primary_evidence"
+      }
+    },
+    {
+      "id": "context_late_night_coding",
+      "category": "context_vibe",
+      "text": "late night coding background music",
+      "expected_tags": [
+        "ambient",
+        "focus",
+        "background",
+        "calm",
+        "minimal"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "party",
+        "chaotic"
+      ],
+      "expectations": {
+        "top_k": 10
+      }
+    },
+    {
+      "id": "context_warm_lounge",
+      "category": "context_vibe",
+      "text": "warm lounge",
+      "expected_tags": [
+        "warm",
+        "lounge",
+        "chill",
+        "downtempo",
+        "relaxed"
+      ],
+      "avoid_tags": [
+        "hardcore",
+        "metal",
+        "aggressive"
+      ],
+      "expectations": {
+        "top_k": 10
+      }
+    },
+    {
+      "id": "context_chill_bar",
+      "category": "context_vibe",
+      "text": "chill bar",
+      "expected_tags": [
+        "chill",
+        "relaxed",
+        "downtempo",
+        "lounge",
+        "warm"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "metal",
+        "chaotic",
+        "hardcore"
+      ],
+      "expectations": {
+        "top_k": 10
+      }
+    },
+    {
+      "id": "negative_low_aggression_danceable",
+      "category": "mixed",
+      "text": "danceable but not aggressive",
+      "expected_tags": [
+        "dance",
+        "danceable"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal"
+      ],
+      "expectations": {
+        "top_k": 10
+      }
+    },
+    {
+      "id": "context_warm_lounge_bar_music",
+      "category": "context_vibe",
+      "text": "warm lounge bar music",
+      "expected_tags": [
+        "warm",
+        "lounge",
+        "chill",
+        "downtempo",
+        "background"
+      ],
+      "avoid_tags": [
+        "hardcore",
+        "metal",
+        "aggressive",
+        "chaotic"
+      ],
+      "expectations": {
+        "expected_mode": "context_vibe",
+        "semantic_role": "primary_evidence",
+        "top_k": 10,
+        "rank_reason_primary_top": "context_fit",
+        "must_have_evidence_sources_top": [
+          "context_fit",
+          "tags"
+        ]
+      }
+    },
+    {
+      "id": "context_cooking_dinner",
+      "category": "context_vibe",
+      "text": "music for cooking dinner",
+      "expected_tags": [
+        "cooking",
+        "dinner",
+        "warm",
+        "background",
+        "groovy"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "chaotic",
+        "hardcore",
+        "workout"
+      ],
+      "expectations": {
+        "expected_mode": "context_vibe",
+        "semantic_role": "primary_evidence",
+        "top_k": 10
+      }
+    },
+    {
+      "id": "context_no_vocals_background",
+      "category": "context_vibe",
+      "text": "no vocals background music",
+      "expected_tags": [
+        "instrumental",
+        "background",
+        "ambient",
+        "calm",
+        "focus"
+      ],
+      "avoid_tags": [
+        "vocal",
+        "vocals",
+        "speech",
+        "aggressive"
+      ],
+      "expectations": {
+        "expected_mode": "context_vibe",
+        "semantic_role": "primary_evidence",
+        "top_k": 10
+      }
+    },
+    {
+      "id": "context_dark_ambient_not_aggressive",
+      "category": "context_vibe",
+      "text": "dark ambient but not aggressive",
+      "expected_tags": [
+        "dark",
+        "ambient",
+        "atmospheric",
+        "background"
+      ],
+      "avoid_tags": [
+        "aggressive",
+        "hardcore",
+        "metal",
+        "chaotic"
+      ],
+      "expectations": {
+        "expected_mode": "context_vibe",
+        "semantic_role": "primary_evidence",
+        "must_match_any": [
+          "ambient",
+          "dark"
+        ],
+        "top_k": 5
+      }
+    },
+    {
+      "id": "llm_objective_highest_bpm_stays_local",
+      "category": "llm_merge",
+      "text": "highest BPM",
+      "expectations": {
+        "expected_mode": "feature_sort",
+        "semantic_role": "supporting_tie_breaker",
+        "sort_by": {
+          "field": "tempo_bpm",
+          "direction": "desc"
+        },
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ],
+        "top_k": 10
+      }
+    },
+    {
+      "id": "llm_context_warm_lounge_stays_contextual",
+      "category": "llm_merge",
+      "text": "warm lounge",
+      "expected_tags": [
+        "warm",
+        "lounge",
+        "chill",
+        "downtempo",
+        "relaxed"
+      ],
+      "avoid_tags": [
+        "hardcore",
+        "metal",
+        "aggressive"
+      ],
+      "expectations": {
+        "expected_mode": "context_vibe",
+        "semantic_role": "primary_evidence",
+        "top_k": 10
+      }
+    },
+    {
+      "id": "semantic_only_weird_result_guardrail",
+      "category": "fallback_semantic",
+      "text": "obscure surreal purple spaceship lullaby",
+      "expectations": {
+        "must_not_warnings_top": [
+          "semantic_only_match"
+        ],
+        "top_n": 1
+      }
+    }
+  ]
+}

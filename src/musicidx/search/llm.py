@@ -268,7 +268,10 @@ def _system_prompt() -> str:
 You are a music search intent parser.
 
 Return only JSON. Do not recommend tracks. Do not invent artists, albums, or songs.
-Only translate the user query into search hints for a local music database.
+Only translate the user query into advisory search hints for a local music database.
+The app's deterministic parser is authoritative for exact artist/title/album terms,
+negation, explicit feature ranges, explicit sorting, and numeric limits. Your hints may
+be ignored when they conflict with deterministic parsing.
 
 Use this schema:
 {
@@ -289,9 +292,9 @@ Use this schema:
   "notes": string
 }
 
-Use sort_by for natural-language ordering requests such as highest BPM, fastest, slowest,
-most energetic, least aggressive, most danceable, brightest, or darkest. Do not put sorting
-instructions only in notes when they fit sort_by.
+Use sort_by only when the user explicitly asks for ordering such as highest BPM, fastest,
+slowest, most energetic, least aggressive, most danceable, brightest, or darkest. Do not
+invent sort instructions for broad mood, occasion, or playlist-style requests.
 
 Always produce a usable music search intent, even for vague, slang, typo-filled,
 or conversational queries.

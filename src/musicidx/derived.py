@@ -9,6 +9,7 @@ from typing import Any
 
 from musicidx.db import utc_now
 from musicidx.profiles import rebuild_track_profile
+from musicidx.tempo import perceived_tempo_bpm
 
 DERIVED_TAG_SOURCE = "derived:features"
 
@@ -91,7 +92,7 @@ def rebuild_derived_signals(
 
 def derive_feature_tags(row: sqlite3.Row | dict[str, Any]) -> list[DerivedTag]:
     """Create search tags from deterministic audio-feature thresholds."""
-    bpm = _value(row, "bpm")
+    bpm = perceived_tempo_bpm(_value(row, "bpm"))
     energy = _value(row, "energy")
     danceability = _value(row, "danceability")
     aggression = _value(row, "aggression")
@@ -137,7 +138,7 @@ def derive_feature_tags(row: sqlite3.Row | dict[str, Any]) -> list[DerivedTag]:
 
 def derive_context_fit(row: sqlite3.Row | dict[str, Any]) -> list[ContextFit]:
     """Score transparent listening contexts from basic audio features."""
-    bpm = _value(row, "bpm")
+    bpm = perceived_tempo_bpm(_value(row, "bpm"))
     energy = _value(row, "energy")
     danceability = _value(row, "danceability")
     aggression = _value(row, "aggression")

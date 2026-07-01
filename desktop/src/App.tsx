@@ -81,6 +81,26 @@ type SearchResult = {
   raw_score?: number;
   confidence?: "high" | "medium" | "low" | string | null;
   warnings?: string[];
+  rank_reason?: {
+    mode?: string;
+    primary?: string;
+    summary?: string;
+    signals?: string[];
+    components?: Array<{ name?: string; label?: string; score?: number }>;
+    sort?: { field?: string; label?: string; direction?: string; source?: string; value?: number | null };
+  } | null;
+  candidate_evidence?: {
+    retrieved_by?: string[];
+    sources?: Array<{
+      source?: string;
+      role?: string;
+      score?: number;
+      matched?: boolean;
+      details?: Record<string, unknown>;
+    }>;
+    identity?: Record<string, boolean>;
+    semantic_only?: boolean;
+  } | null;
   why?: string[];
   scores?: Record<string, number>;
   matched_tags?: Array<{ tag: string; score: number; source: string }>;
@@ -140,6 +160,32 @@ type SearchPayload = {
   intent?: SearchIntentSummary;
   diagnostics?: Record<string, unknown>;
   results?: SearchResult[];
+};
+
+type MatchTrackInfo = {
+  track_id?: string;
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  path?: string;
+};
+
+type MatchReport = {
+  decision?: string;
+  identity_decision?: string;
+  confidence?: string;
+  confidence_score?: number;
+  reasons?: string[];
+  warnings?: string[];
+  track_a?: MatchTrackInfo;
+  track_b?: MatchTrackInfo;
+};
+
+type MatchTrackPayload = {
+  track_id?: string;
+  against_library?: boolean;
+  count?: number;
+  reports?: MatchReport[];
 };
 
 type HealthWarning = {
@@ -289,6 +335,7 @@ export default function App() {
   const [rawOutput, setRawOutput] = useState("Ready.");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [lastSearchPayload, setLastSearchPayload] = useState<SearchPayload | null>(null);
+  const [matchPayload, setMatchPayload] = useState<MatchTrackPayload | null>(null);
   const [playerTrack, setPlayerTrack] = useState<SearchResult | null>(null);
   const [playerSrc, setPlayerSrc] = useState("");
   const [playerError, setPlayerError] = useState("");
@@ -696,6 +743,7 @@ export default function App() {
     setPipelineCompleted(0);
     setPipelineSummaries([]);
     setResults([]);
+    setMatchPayload(null);
     try {
       for (const [index, step] of indexSteps.entries()) {
         setPipelineStep(step.label);
@@ -771,6 +819,7 @@ export default function App() {
     const payload = await runJsonCommand<SearchPayload>(args);
     setResults(payload.results ?? []);
     setLastSearchPayload(payload);
+    setMatchPayload(null);
     writeRaw({
       summary: {
         query: payload.query,
@@ -888,6 +937,25 @@ export default function App() {
     if (nextTrack) {
       void playTrack(nextTrack);
     }
+  }
+
+  async function findMatches(result: SearchResult) {
+    const args = [
+      "match-track",
+      "--track-id",
+      result.track_id,
+      "--against-library",
+      "--limit",
+      "5",
+      "--json",
+    ];
+    const payload = await runJsonCommand<MatchTrackPayload>(args);
+    setMatchPayload(payload);
+    updateStatus(
+      payload.count
+        ? `Found ${payload.count} match candidate${payload.count === 1 ? "" : "s"}`
+        : "No deterministic match candidates found",
+    );
   }
 
   async function revealTrack(result: SearchResult) {
@@ -1504,6 +1572,7 @@ export default function App() {
             {lastSearchPayload ? (
               <SearchParametersPanel payload={lastSearchPayload} onSearchSuggestion={searchMusic} />
             ) : null}
+            {matchPayload ? <MatchSummaryPanel payload={matchPayload} /> : null}
             <div className="rounded-lg border bg-muted/50 px-3 py-2 text-xs text-muted-foreground wrap-anywhere">
               {backgroundStatus}
             </div>
@@ -1535,6 +1604,7 @@ export default function App() {
                   onFeedback={saveFeedback}
                   onPlay={playTrack}
                   onReveal={revealTrack}
+                  onMatch={findMatches}
                   playingTrackId={playerTrack?.track_id ?? null}
                 />
               ))}
@@ -1754,6 +1824,11 @@ function SearchParametersPanel({
   const sortSpecs = intent.sort_by ?? [];
   const weights = recordValue(diagnostics.weights);
   const scoreWarnings = stringList(diagnostics.score_warnings);
+  const evidenceCountStages = [
+    ["scored", recordValue(diagnostics.scored_evidence_source_counts)],
+    ["filtered", recordValue(diagnostics.filtered_evidence_source_counts)],
+    ["limited", recordValue(diagnostics.limited_evidence_source_counts)],
+  ] as const;
   const suggestions = searchSuggestionsFromDiagnostics(diagnostics);
   const hasCorrectionSuggestion = suggestions.some((suggestion) => suggestion.kind === "correction");
   const notice = searchNoticeFromDiagnostics(diagnostics);
@@ -1868,7 +1943,22 @@ function SearchParametersPanel({
             .filter(Boolean)
             .join(" · ")}
         />
+        <SearchParamBlock
+          label="Evidence counts"
+          value={formatEvidenceCountStages(evidenceCountStages)}
+        />
       </div>
+
+      {evidenceCountStages.some(([, counts]) => Object.keys(counts).length > 0) ? (
+        <details className="rounded-md border bg-background/50 p-2">
+          <summary className="cursor-pointer font-medium text-foreground">Evidence source counts</summary>
+          <div className="mt-2 grid gap-2 md:grid-cols-3">
+            {evidenceCountStages.map(([stage, counts]) => (
+              <SearchParamBlock key={stage} label={stage} value={formatRecordCounts(counts)} />
+            ))}
+          </div>
+        </details>
+      ) : null}
 
       {Object.keys(weights).length > 0 ? (
         <details className="rounded-md border bg-background/50 p-2">
@@ -1885,6 +1975,54 @@ function SearchParamBlock({ label, value }: { label: string; value: string }) {
     <div className="min-w-0 rounded-md bg-background/50 p-2">
       <p className="font-medium text-foreground">{label}</p>
       <p className="wrap-anywhere">{value || "—"}</p>
+    </div>
+  );
+}
+
+function MatchSummaryPanel({ payload }: { payload: MatchTrackPayload }) {
+  const reports = payload.reports ?? [];
+  const source = reports[0]?.track_a;
+  return (
+    <div className="grid gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Match report</span>
+        <Badge variant="secondary">{payload.count ?? reports.length} candidates</Badge>
+        {source ? (
+          <span className="wrap-anywhere">
+            {source.artist ? `${source.artist} · ` : ""}{source.title || source.track_id}
+          </span>
+        ) : null}
+      </div>
+      {reports.length ? (
+        <div className="grid gap-2">
+          {reports.slice(0, 5).map((report, index) => (
+            <div key={`${report.track_b?.track_id || index}`} className="rounded-md border bg-background/50 p-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={report.identity_decision === "same" ? "secondary" : "outline"}>
+                  {report.decision || "unknown"}
+                </Badge>
+                <span className="font-medium text-foreground">
+                  {report.track_b?.artist ? `${report.track_b.artist} · ` : ""}
+                  {report.track_b?.title || report.track_b?.track_id || "candidate"}
+                </span>
+                <span>
+                  {report.confidence || "low"} {numericText(report.confidence_score)}
+                </span>
+              </div>
+              {report.reasons?.length ? (
+                <p className="mt-1 wrap-anywhere">{report.reasons.join("; ")}</p>
+              ) : null}
+              {report.warnings?.length ? (
+                <p className="mt-1 wrap-anywhere text-yellow-700 dark:text-yellow-300">
+                  {report.warnings.join("; ")}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p>No deterministic match candidates found.</p>
+      )}
     </div>
   );
 }
@@ -2052,6 +2190,7 @@ function ResultCard({
   onFeedback,
   onPlay,
   onReveal,
+  onMatch,
   playingTrackId,
 }: {
   result: SearchResult;
@@ -2060,6 +2199,7 @@ function ResultCard({
   onFeedback: (result: SearchResult, rating: "good" | "bad" | "neutral") => Promise<void>;
   onPlay: (result: SearchResult) => Promise<void>;
   onReveal: (result: SearchResult) => Promise<void>;
+  onMatch: (result: SearchResult) => Promise<void>;
   playingTrackId: string | null;
 }) {
   const [savedRating, setSavedRating] = useState<"good" | "bad" | "neutral" | null>(
@@ -2074,8 +2214,15 @@ function ResultCard({
   const tagText = result.matched_tags?.length
     ? result.matched_tags.map((tag) => `${tag.tag} ${tag.score.toFixed(2)}`).join(", ")
     : "";
+  const rankReasonText = formatRankReason(result.rank_reason);
+  const evidenceText = formatCandidateEvidence(result.candidate_evidence);
   const hasLongContent =
-    why.length > 180 || tagText.length > 140 || result.path.length > 120 || title.length > 80;
+    why.length > 180 ||
+    tagText.length > 140 ||
+    rankReasonText.length > 160 ||
+    evidenceText.length > 160 ||
+    result.path.length > 120 ||
+    title.length > 80;
   const isPlaying = playingTrackId === result.track_id;
 
   useEffect(() => {
@@ -2127,6 +2274,12 @@ function ResultCard({
         )}
       >
         <p className="wrap-anywhere text-sm text-muted-foreground">{why}</p>
+        {rankReasonText ? (
+          <p className="wrap-anywhere text-xs text-muted-foreground">Rank: {rankReasonText}</p>
+        ) : null}
+        {evidenceText ? (
+          <p className="wrap-anywhere text-xs text-muted-foreground">Evidence: {evidenceText}</p>
+        ) : null}
         {tagText ? (
           <p className="wrap-anywhere text-xs text-muted-foreground">Tags: {tagText}</p>
         ) : null}
@@ -2151,6 +2304,10 @@ function ResultCard({
           <Button size="sm" variant="outline" onClick={() => void onReveal(result)}>
             <FolderOpen className="h-3.5 w-3.5" />
             Show
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void onMatch(result)}>
+            <ListChecks className="h-3.5 w-3.5" />
+            Matches
           </Button>
         </div>
         <div className="grid gap-1 sm:justify-items-end">
@@ -2335,6 +2492,71 @@ function formatSortSpec(spec: SearchSortSpec): string {
   const field = (spec.field || "unknown").replaceAll("_", " ");
   const direction = spec.direction === "asc" ? "lowest first" : "highest first";
   return `${field} ${direction}`;
+}
+
+function formatEvidenceCountStages(
+  stages: ReadonlyArray<readonly [string, Record<string, unknown>]>,
+): string {
+  const parts = stages
+    .map(([stage, counts]) => {
+      let total = 0;
+      for (const value of Object.values(counts)) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          total += value;
+        }
+      }
+      return total > 0 ? `${stage} ${total}` : null;
+    })
+    .filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" · ") : "none";
+}
+
+function formatRecordCounts(counts: Record<string, unknown>): string {
+  const entries = Object.entries(counts).filter(
+    ([, value]) => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+  if (!entries.length) {
+    return "none";
+  }
+  return entries
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key.replaceAll("_", " ")} ${numericText(value)}`)
+    .join(" · ");
+}
+
+function formatRankReason(reason: SearchResult["rank_reason"]): string {
+  if (!reason) {
+    return "";
+  }
+  const parts = [
+    reason.summary || reason.primary?.replaceAll("_", " "),
+    reason.mode ? `mode ${reason.mode.replaceAll("_", " ")}` : null,
+    reason.sort
+      ? `${reason.sort.label || reason.sort.field || "sort"} ${reason.sort.direction || ""} ${numericText(
+          reason.sort.value,
+        )}`.trim()
+      : null,
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function formatCandidateEvidence(evidence: SearchResult["candidate_evidence"]): string {
+  if (!evidence) {
+    return "";
+  }
+  const sources = evidence.retrieved_by?.length
+    ? evidence.retrieved_by.map((source) => source.replaceAll("_", " ")).join(", ")
+    : "none";
+  const identity = evidence.identity
+    ? Object.entries(evidence.identity)
+        .filter(([, available]) => available)
+        .map(([key]) => key.replaceAll("_", " "))
+        .join(", ")
+    : "";
+  const flags = [evidence.semantic_only ? "semantic only" : null, identity ? `identity ${identity}` : null]
+    .filter(Boolean)
+    .join(" · ");
+  return flags ? `${sources} · ${flags}` : sources;
 }
 
 function formatWeights(weights: Record<string, unknown>): string {

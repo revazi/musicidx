@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
@@ -8,7 +9,9 @@ from typer.testing import CliRunner
 from musicidx.analyzer.embeddings import save_profile_embedding
 from musicidx.cli import _search_payload, app
 from musicidx.db import connect_db, init_db
-from musicidx.search.intent import parse_intent_dynamic
+from musicidx.search.evaluation import load_eval_queries
+from musicidx.search.intent import IntentHints, SortSpec, parse_intent_dynamic
+from musicidx.search.plan import classify_search_mode, semantic_role_for_intent
 from musicidx.search.ranker import search_music
 
 
@@ -107,6 +110,31 @@ def test_parse_intent_detects_im_in_love_as_romantic(tmp_path):
         conn.close()
 
 
+def test_parse_intent_detects_high_bpm_sort(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "fast-track",
+            tmp_path / "fast.mp3",
+            profile_text="fast dance",
+            tags=[("essentia:mood", "energetic", 0.9)],
+            energy=0.80,
+            aggression=0.40,
+            danceability=0.90,
+            bpm=150.0,
+        )
+
+        intent = parse_intent_dynamic("high bpm", conn)
+
+        assert intent.sort_by[0].field == "tempo_bpm"
+        assert intent.sort_by[0].direction == "desc"
+        assert intent.feature_ranges["tempo_bpm"].source.endswith("high")
+    finally:
+        conn.close()
+
+
 def test_parse_intent_detects_highest_bpm_sort(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
@@ -129,6 +157,391 @@ def test_parse_intent_detects_highest_bpm_sort(tmp_path):
         assert intent.sort_by[0].field == "tempo_bpm"
         assert intent.sort_by[0].direction == "desc"
         assert intent.feature_ranges["tempo_bpm"].source.endswith("very_high")
+    finally:
+        conn.close()
+
+
+def test_parse_intent_llm_hints_do_not_override_objective_sort(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "fast-track",
+            tmp_path / "fast.mp3",
+            profile_text="fast energetic dance",
+            tags=[("essentia:mood", "energetic", 0.9)],
+            energy=0.90,
+            aggression=0.30,
+            danceability=0.90,
+            bpm=150.0,
+        )
+        hints = IntentHints(
+            contexts=["sleep"],
+            prefer_tag_concepts=["calm"],
+            avoid_tag_concepts=["energetic"],
+            feature_preferences={"energy": "very_low"},
+            sort_by=[SortSpec(field="energy", direction="asc", source="llm")],
+            limit=99,
+            notes="bad objective override",
+        )
+
+        intent = parse_intent_dynamic("highest BPM", conn, llm_hints=hints, parser="dynamic+test")
+
+        assert intent.limit == 10
+        assert intent.contexts == []
+        assert intent.sort_by == [
+            SortSpec(field="tempo_bpm", direction="desc", source="natural_language")
+        ]
+        assert "tempo_bpm" in intent.feature_ranges
+        assert "energy" not in intent.feature_ranges
+        assert intent.llm_hints is None
+        assert intent.llm_rejected_hints == hints
+        assert intent.llm_policy["role"] == "ignored_for_objective_query"
+        assert intent.llm_policy["ignored_because"] == "explicit_sort"
+    finally:
+        conn.close()
+
+
+def test_parse_intent_llm_hints_expand_only_contextual_queries(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "romantic-track",
+            tmp_path / "romantic.mp3",
+            profile_text="romantic happy warm soul dance",
+            tags=[("essentia:mood", "romantic", 0.9)],
+            energy=0.55,
+            aggression=0.10,
+            danceability=0.80,
+            bpm=110.0,
+        )
+        hints = IntentHints(
+            contexts=["happy"],
+            prefer_tag_concepts=["romantic"],
+            avoid_tag_concepts=["hardcore"],
+            feature_preferences={"energy": "very_low"},
+            sort_by=[SortSpec(field="energy", direction="asc", source="llm")],
+            limit=99,
+            notes="context expansion",
+        )
+
+        intent = parse_intent_dynamic(
+            "wedding reception",
+            conn,
+            llm_hints=hints,
+            parser="dynamic+test",
+        )
+
+        assert intent.limit == 10
+        assert intent.contexts == ["wedding", "happy"]
+        assert "romantic" in intent.prefer_tag_concepts
+        assert "hardcore" in intent.avoid_tag_concepts
+        assert intent.sort_by == []
+        assert intent.llm_hints is not None
+        assert intent.llm_hints.contexts == ["happy"]
+        assert intent.llm_hints.feature_preferences == {}
+        assert intent.llm_rejected_hints is not None
+        assert intent.llm_rejected_hints.feature_preferences == {"energy": "very_low"}
+        assert intent.llm_rejected_hints.sort_by == [
+            SortSpec(field="energy", direction="asc", source="llm")
+        ]
+        assert intent.llm_rejected_hints.limit == 99
+        assert intent.llm_policy["role"] == "advisory_context_expansion"
+        assert intent.llm_policy["accepted_fields"] == [
+            "contexts",
+            "prefer_tag_concepts",
+            "avoid_tag_concepts",
+        ]
+        assert intent.llm_policy["rejected_fields"] == [
+            "feature_preferences",
+            "sort_by",
+            "limit",
+        ]
+    finally:
+        conn.close()
+
+
+def test_search_plan_command_reports_content_plus_sort_plan(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "techno-track",
+            tmp_path / "techno.mp3",
+            title="Techno Track",
+            artist="Artist A",
+            profile_text="electronic techno club",
+            tags=[("essentia:genre", "electronic---techno", 0.9)],
+            energy=0.80,
+            aggression=0.30,
+            danceability=0.90,
+            bpm=140.0,
+        )
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(
+        app,
+        ["search-plan", "highest BPM techno", "--db", str(db_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    plan = payload["plan"]
+    assert plan["mode"] == "feature_sort"
+    assert plan["terms"]["content"] == ["techno"]
+    assert plan["semantic"]["role"] == "disabled"
+    assert {item["type"] for item in plan["must"]} == {
+        "feature_present",
+        "tag_or_text",
+    }
+    assert {item.get("concept") for item in plan["must"]} >= {"techno", None}
+    assert plan["sort"] == [
+        {"field": "tempo_bpm", "direction": "desc", "source": "natural_language"}
+    ]
+
+
+def test_contextual_queries_classify_as_context_vibe_before_broad_tag_genre(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "context-track",
+            tmp_path / "context.mp3",
+            profile_text="warm lounge instrumental dark ambient background",
+            tags=[
+                ("derived:features", "warm_lounge", 0.9),
+                ("essentia:mood", "instrumental", 0.9),
+                ("essentia:genre", "electronic---ambient", 0.9),
+                ("essentia:mood", "dark", 0.8),
+                ("essentia:mood", "background", 0.8),
+            ],
+            energy=0.30,
+            aggression=0.10,
+            danceability=0.45,
+            bpm=86.0,
+        )
+
+        for query in [
+            "warm lounge bar music",
+            "warm lounge",
+            "no vocals background music",
+            "dark ambient but not aggressive",
+        ]:
+            intent = parse_intent_dynamic(query, conn)
+            mode = classify_search_mode(intent)
+            intent.use_semantic = True
+            intent.semantic_model = "test-model"
+            assert mode == "context_vibe", query
+            assert semantic_role_for_intent(intent, mode=mode) == "primary_evidence"
+
+        direct_ambient = parse_intent_dynamic("ambient", conn)
+        assert classify_search_mode(direct_ambient) == "tag_genre"
+    finally:
+        conn.close()
+
+
+def test_search_plan_command_reports_stable_phase2_json_keys(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "track-1",
+            tmp_path / "track.mp3",
+            title="Quiet Track",
+            artist="Artist A",
+            profile_text="quiet instrumental background",
+            tags=[("essentia:mood", "instrumental", 0.9)],
+            energy=0.20,
+            aggression=0.05,
+            danceability=0.20,
+            bpm=82.0,
+        )
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(
+        app,
+        ["search-plan", "no vocals background music", "--db", str(db_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    plan = payload["plan"]
+    assert plan["schema_version"] == 1
+    assert set(plan) >= {
+        "schema_version",
+        "query",
+        "parser",
+        "mode",
+        "terms",
+        "entities",
+        "must",
+        "should",
+        "avoid",
+        "hard_filters",
+        "sort",
+        "semantic",
+        "llm",
+        "diagnostics",
+        "warnings",
+    }
+    assert set(plan["terms"]) >= {"content", "directives", "negated", "raw_query_terms"}
+    assert set(plan["terms"]["negated"]) == {"singing", "singer", "vocal", "vocals"}
+    assert plan["entities"] == {"artists": [], "titles": [], "albums": []}
+    assert plan["hard_filters"]["missing"] is False
+    assert plan["llm"]["used"] is False
+    assert plan["llm"]["role"] == "none"
+    assert plan["llm"]["provider"] is None
+    assert plan["llm"]["model"] is None
+    assert plan["llm"]["ignored_because"] is None
+    source_plan = plan["diagnostics"]["candidate_source_plan"]
+    assert {source["source"] for source in source_plan} >= {
+        "metadata_text_fts",
+        "tags",
+        "features",
+        "context_fit",
+        "semantic_profile",
+        "audio_embedding",
+        "fingerprint",
+        "feedback",
+    }
+    assert plan["diagnostics"]["notes"]
+
+
+def test_search_plan_command_reports_occasion_plan_without_literal_must_match(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "love-track",
+            tmp_path / "love.mp3",
+            title="Love Track",
+            artist="Artist A",
+            profile_text="romantic happy soul dance",
+            tags=[("essentia:mood", "romantic", 0.9)],
+            energy=0.55,
+            aggression=0.10,
+            danceability=0.80,
+            bpm=110.0,
+        )
+    finally:
+        conn.close()
+
+    result = CliRunner().invoke(
+        app,
+        ["search-plan", "wedding reception", "--db", str(db_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    plan = payload["plan"]
+    assert plan["mode"] == "occasion"
+    assert plan["must"] == []
+    assert {item.get("concept") for item in plan["should"]} >= {"wedding", "romantic"}
+    assert "aggressive" in {item.get("concept") for item in plan["avoid"]}
+    assert plan["semantic"]["role"] == "disabled"
+
+
+def test_search_music_tag_genre_mode_filters_feature_only_matches(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "ambient-track",
+            tmp_path / "ambient.mp3",
+            title="Soft Air",
+            artist="Artist A",
+            profile_text="ambient calm soundscape background",
+            tags=[("essentia:genre", "electronic---ambient", 0.9)],
+            energy=0.20,
+            aggression=0.05,
+            danceability=0.20,
+            bpm=82.0,
+        )
+        _insert_track(
+            conn,
+            "feature-only-track",
+            tmp_path / "soft-rock.mp3",
+            title="Soft Rock",
+            artist="Artist B",
+            profile_text="relaxed guitar rock",
+            tags=[("essentia:genre", "rock", 0.9)],
+            energy=0.15,
+            aggression=0.02,
+            danceability=0.25,
+            bpm=84.0,
+        )
+
+        response = search_music(conn, "ambient", limit=5, explain=True)
+
+        assert response.diagnostics["mode"] == "tag_genre"
+        assert [result.track_id for result in response.results] == ["ambient-track"]
+        assert "feature-only-track" not in {result.track_id for result in response.results}
+    finally:
+        conn.close()
+
+
+def test_search_music_metadata_exact_mode_filters_weak_partial_title_matches(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "walk-of-life",
+            tmp_path / "walk-of-life.mp3",
+            title="Walk Of Life",
+            artist="Dire Straits",
+            profile_text="Artist: Dire Straits. Title: Walk Of Life. Rock.",
+            tags=[("essentia:genre", "rock", 0.9)],
+            energy=0.70,
+            aggression=0.20,
+            danceability=0.70,
+            bpm=86.0,
+        )
+        _insert_track(
+            conn,
+            "life-goes-on",
+            tmp_path / "life-goes-on.mp3",
+            title="Life Goes On",
+            artist="Artist B",
+            profile_text="hip hop song about life",
+            tags=[("essentia:genre", "hip hop", 0.9)],
+            energy=0.70,
+            aggression=0.30,
+            danceability=0.70,
+            bpm=95.0,
+        )
+        _insert_track(
+            conn,
+            "walking-away",
+            tmp_path / "walking-away.mp3",
+            title="Walking Away",
+            artist="Artist C",
+            profile_text="pop song walking away",
+            tags=[("essentia:genre", "pop", 0.9)],
+            energy=0.60,
+            aggression=0.20,
+            danceability=0.65,
+            bpm=100.0,
+        )
+
+        response = search_music(conn, "Walk Of Life", limit=5, explain=True)
+
+        assert response.diagnostics["mode"] == "metadata_exact"
+        assert [result.track_id for result in response.results] == ["walk-of-life"]
+        assert response.results[0].breakdown["metadata_score"] >= 0.65
     finally:
         conn.close()
 
@@ -187,7 +600,188 @@ def test_search_music_sorts_by_highest_bpm(tmp_path):
         assert response.diagnostics["sort_by"] == [
             {"field": "tempo_bpm", "direction": "desc", "source": "natural_language"}
         ]
-        assert "sorted by highest BPM" in "; ".join(response.results[0].explanation)
+        rank_reason = response.results[0].breakdown["rank_reason"]
+        assert rank_reason["primary"] == "explicit_sort"
+        assert rank_reason["sort"] == {
+            "field": "tempo_bpm",
+            "label": "perceived BPM",
+            "direction": "desc",
+            "source": "natural_language",
+            "value": 155.0,
+        }
+        assert "sorted by highest perceived BPM" in "; ".join(response.results[0].explanation)
+    finally:
+        conn.close()
+
+
+def test_search_music_uses_perceived_bpm_for_double_time_pop_rock(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "double-time-rock",
+            tmp_path / "walk-of-life.mp3",
+            title="Walk Of Life",
+            artist="Dire Straits",
+            genre="Rock",
+            profile_text="Artist: Dire Straits. Title: Walk Of Life. Rock.",
+            tags=[("derived:features", "fast", 1.0)],
+            energy=0.70,
+            aggression=0.20,
+            danceability=0.70,
+            bpm=172.0,
+        )
+        _insert_track(
+            conn,
+            "actual-fast",
+            tmp_path / "actual-fast.mp3",
+            title="Actual Fast",
+            artist="Artist B",
+            profile_text="fast dance track",
+            tags=[("derived:features", "fast", 1.0)],
+            energy=0.90,
+            aggression=0.30,
+            danceability=0.90,
+            bpm=150.0,
+        )
+
+        response = search_music(conn, "highest BPM", explain=True)
+
+        assert response.results[0].track_id == "actual-fast"
+        assert response.results[1].track_id == "double-time-rock"
+        assert response.results[1].breakdown["sort_values"]["tempo_bpm"] == 86.0
+        assert "sorted by highest perceived BPM: 86.00" in "; ".join(
+            response.results[1].explanation
+        )
+    finally:
+        conn.close()
+
+
+def test_search_music_preserves_high_bpm_for_drum_and_bass(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "dnb",
+            tmp_path / "dnb.mp3",
+            title="Jungle Runner",
+            artist="Artist A",
+            genre="Electronic",
+            profile_text="drum and bass jungle fast",
+            tags=[("essentia:genre", "electronic---drum n bass", 0.9)],
+            energy=0.90,
+            aggression=0.35,
+            danceability=0.85,
+            bpm=174.0,
+        )
+
+        response = search_music(conn, "highest BPM", explain=True)
+
+        assert response.results[0].track_id == "dnb"
+        assert response.results[0].breakdown["sort_values"]["tempo_bpm"] == 174.0
+        assert "sorted by highest perceived BPM: 174.00" in "; ".join(
+            response.results[0].explanation
+        )
+    finally:
+        conn.close()
+
+
+def test_search_music_sorts_high_bpm_by_feature_not_semantic_or_title(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "title-high",
+            tmp_path / "title-high.mp3",
+            title="Love High",
+            artist="Artist A",
+            profile_text="love high medium tempo",
+            tags=[("derived:features", "midtempo", 1.0)],
+            energy=0.60,
+            aggression=0.20,
+            danceability=0.65,
+            bpm=105.0,
+        )
+        _insert_track(
+            conn,
+            "higher-bpm",
+            tmp_path / "higher-bpm.mp3",
+            title="Plain Track",
+            artist="Artist B",
+            profile_text="plain track",
+            tags=[("derived:features", "fast", 1.0)],
+            energy=0.70,
+            aggression=0.20,
+            danceability=0.70,
+            bpm=150.0,
+        )
+
+        response = search_music(conn, "high bpm", explain=True)
+
+        assert response.results[0].track_id == "higher-bpm"
+        assert response.results[0].breakdown["sort_values"]["tempo_bpm"] == 150.0
+        assert "sorted by highest perceived BPM" in "; ".join(response.results[0].explanation)
+    finally:
+        conn.close()
+
+
+def test_search_music_sorts_within_content_matches_for_feature_sort(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "high-pop",
+            tmp_path / "high-pop.mp3",
+            title="High Pop",
+            artist="Artist A",
+            genre="Pop",
+            profile_text="pop track",
+            tags=[("derived:features", "fast", 1.0)],
+            energy=0.80,
+            aggression=0.20,
+            danceability=0.75,
+            bpm=155.0,
+        )
+        _insert_track(
+            conn,
+            "techno-fastest",
+            tmp_path / "techno-fastest.mp3",
+            title="Techno Fastest",
+            artist="Artist B",
+            genre="Techno",
+            profile_text="techno fast",
+            tags=[("essentia:genre", "electronic---techno", 0.8)],
+            energy=0.90,
+            aggression=0.25,
+            danceability=0.85,
+            bpm=140.0,
+        )
+        _insert_track(
+            conn,
+            "techno-slower",
+            tmp_path / "techno-slower.mp3",
+            title="Techno Slower",
+            artist="Artist C",
+            genre="Techno",
+            profile_text="techno slower",
+            tags=[("essentia:genre", "electronic---techno", 0.8)],
+            energy=0.80,
+            aggression=0.25,
+            danceability=0.75,
+            bpm=125.0,
+        )
+
+        response = search_music(conn, "highest BPM techno", explain=True)
+
+        assert [result.track_id for result in response.results[:2]] == [
+            "techno-fastest",
+            "techno-slower",
+        ]
+        assert "high-pop" not in [result.track_id for result in response.results]
     finally:
         conn.close()
 
@@ -421,9 +1015,36 @@ def test_search_music_ranks_library_aware_chill_match_first(tmp_path):
         payload = _search_payload(response, db_path="index.sqlite", concise=True)
         assert payload["db_path"] == "index.sqlite"
         assert payload["intent"]["contexts"] == ["chill", "bar"]
+        diagnostics = payload["diagnostics"]
+        assert diagnostics["result_evidence_source_counts"]["tags"] == 1
+        assert diagnostics["result_evidence_source_counts"]["audio_features"] == 1
+        assert diagnostics["limited_evidence_source_counts"] == diagnostics[
+            "result_evidence_source_counts"
+        ]
+        assert set(diagnostics) >= {
+            "scored_evidence_source_counts",
+            "filtered_evidence_source_counts",
+            "limited_evidence_source_counts",
+        }
+        assert diagnostics["scored_evidence_source_counts"]
         assert "library_profile" not in payload["intent"]
         assert payload["results"][0]["track_id"] == "chill-track"
         assert "breakdown" not in payload["results"][0]
+        rank_reason = payload["results"][0]["rank_reason"]
+        assert rank_reason["mode"] == "context_vibe"
+        assert rank_reason["primary"] == "tag_match"
+        assert "tags" in rank_reason["signals"]
+        assert rank_reason["components"]
+        candidate_evidence = payload["results"][0]["candidate_evidence"]
+        assert "tags" in candidate_evidence["retrieved_by"]
+        assert any(source["source"] == "tags" for source in candidate_evidence["sources"])
+        assert set(candidate_evidence["identity"]) == {
+            "content_hash",
+            "chromaprint",
+            "duration_sec",
+            "artist_title_norm",
+        }
+        assert candidate_evidence["semantic_only"] is False
         assert payload["results"][0]["why"]
     finally:
         conn.close()
@@ -670,6 +1291,32 @@ def test_generic_derived_tags_are_not_repeated_in_explanations(tmp_path):
         conn.close()
 
 
+def test_search_regressions_file_loads_and_has_structured_expectations():
+    path = Path("eval/search_regressions.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    queries = data["queries"]
+
+    assert len(queries) >= 20
+    seen_ids: set[str] = set()
+    for item in queries:
+        query_id = item.get("id")
+        assert isinstance(query_id, str) and query_id
+        assert query_id not in seen_ids
+        seen_ids.add(query_id)
+        assert item.get("text") or item.get("query")
+        assert isinstance(item.get("expectations"), dict)
+
+    loaded = load_eval_queries(path)
+    assert len(loaded) == len(queries)
+    for item in queries:
+        expectations = item.get("expectations") or {}
+        if expectations.get("expected_mode") == "feature_sort":
+            sort_by = expectations.get("sort_by")
+            assert isinstance(sort_by, dict), item["id"]
+            assert sort_by.get("field")
+            assert sort_by.get("direction") in {"asc", "desc"}
+
+
 def test_eval_command_reports_search_quality_metrics(tmp_path):
     db_path = tmp_path / "index.sqlite"
     conn = connect_db(db_path)
@@ -731,6 +1378,128 @@ def test_eval_command_reports_search_quality_metrics(tmp_path):
     assert payload["results"][0]["precision_at_k"] == 1.0
     assert payload["results"][0]["avoid_rate"] == 0.0
     assert payload["results"][0]["tag_coverage"] == 1.0
+
+
+def test_eval_command_reports_structured_regression_checks(tmp_path):
+    db_path = tmp_path / "index.sqlite"
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "techno-fast",
+            tmp_path / "techno-fast.mp3",
+            title="Peak Techno",
+            artist="Artist A",
+            profile_text="peak time electronic techno club",
+            tags=[("essentia:genre", "electronic---techno", 0.9)],
+            energy=0.90,
+            aggression=0.30,
+            danceability=0.95,
+            bpm=145.0,
+        )
+        _insert_track(
+            conn,
+            "techno-slow",
+            tmp_path / "techno-slow.mp3",
+            title="Warm Techno",
+            artist="Artist B",
+            profile_text="warm electronic techno groove",
+            tags=[("essentia:genre", "electronic---techno", 0.8)],
+            energy=0.70,
+            aggression=0.20,
+            danceability=0.80,
+            bpm=126.0,
+        )
+        _insert_track(
+            conn,
+            "rock-fast",
+            tmp_path / "rock-fast.mp3",
+            title="Fast Rock",
+            artist="Artist C",
+            profile_text="fast rock guitar",
+            tags=[("essentia:genre", "rock", 0.9)],
+            energy=0.90,
+            aggression=0.40,
+            danceability=0.60,
+            bpm=160.0,
+        )
+    finally:
+        conn.close()
+
+    eval_file = tmp_path / "regressions.json"
+    eval_file.write_text(
+        json.dumps(
+            {
+                "queries": [
+                    {
+                        "id": "highest_bpm_techno",
+                        "text": "highest BPM techno",
+                        "expectations": {
+                            "expected_mode": "feature_sort",
+                            "semantic_role": "disabled",
+                            "must_match_any": ["techno"],
+                            "must_not_warnings_top": ["semantic_only_match"],
+                            "rank_reason_primary_top": "explicit_sort",
+                            "must_have_evidence_sources_top": ["tags", "audio_features"],
+                            "sort_by": {"field": "tempo_bpm", "direction": "desc"},
+                            "top_k": 2,
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["eval", str(eval_file), "--db", str(db_path), "--limit", "2", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    query_result = payload["results"][0]
+    assert payload["summary"]["structured_query_count"] == 1
+    assert payload["summary"]["avg_structured_pass_rate"] == 1.0
+    assert query_result["structured_passed"] is True
+    assert query_result["issue_types"] == []
+    check_names = {check["name"] for check in query_result["structured_checks"]}
+    assert {"rank_reason_primary_top", "must_have_evidence_sources_top"}.issubset(
+        check_names
+    )
+    assert [row["track_id"] for row in query_result["top_results"]] == [
+        "techno-fast",
+        "techno-slow",
+    ]
+
+
+def test_eval_loader_accepts_query_alias_for_regression_cases(tmp_path):
+    eval_file = tmp_path / "queries.json"
+    eval_file.write_text(
+        json.dumps(
+            {
+                "queries": [
+                    {
+                        "id": "query_alias",
+                        "query": "highest BPM techno",
+                        "expectations": {
+                            "expected_mode": "feature_sort",
+                            "semantic_role": "tie_breaker",
+                            "rank_reason_primary_top": "explicit_sort",
+                            "must_have_evidence_sources_top": ["tags"],
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    queries = load_eval_queries(eval_file)
+
+    assert queries[0].text == "highest BPM techno"
+    assert queries[0].expectations["semantic_role"] == "tie_breaker"
+    assert queries[0].expectations["rank_reason_primary_top"] == "explicit_sort"
+    assert queries[0].expectations["must_have_evidence_sources_top"] == ["tags"]
 
 
 def test_feedback_command_persists_query_aware_feedback(tmp_path):
@@ -1031,6 +1800,52 @@ def test_search_suggests_tag_typo_correction(tmp_path):
         conn.close()
 
 
+def test_weak_semantic_only_fallback_matches_are_suppressed(monkeypatch, tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "weak-semantic-track",
+            tmp_path / "weak-semantic.mp3",
+            title="Unrelated",
+            artist="Artist",
+            profile_text="plain local profile",
+            tags=[],
+            energy=0.50,
+            aggression=0.20,
+            danceability=0.50,
+            bpm=110.0,
+        )
+        save_profile_embedding(
+            conn,
+            "weak-semantic-track",
+            "plain local profile",
+            [1.0, 0.0],
+            model_name="model-a",
+        )
+        conn.commit()
+
+        def fake_semantic_search(*_args, **_kwargs):
+            return [SimpleNamespace(track_id="weak-semantic-track", score=0.35)]
+
+        monkeypatch.setattr("musicidx.search.ranker.search_semantic", fake_semantic_search)
+
+        response = search_music(
+            conn,
+            "obscure surreal purple spaceship lullaby",
+            semantic_model="model-a",
+            limit=1,
+            explain=True,
+        )
+
+        assert response.results == []
+        assert response.diagnostics["minimum_semantic_only_relevance"] == 0.45
+        assert response.diagnostics["result_notice"]["level"] == "warning"
+    finally:
+        conn.close()
+
+
 def test_semantic_only_matches_are_low_confidence_with_explanation(monkeypatch, tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
@@ -1153,6 +1968,7 @@ def _insert_track(
     *,
     title: str | None = None,
     artist: str | None = None,
+    genre: str | None = None,
     profile_text: str,
     tags: list[tuple[str, str, float]],
     energy: float,
@@ -1166,10 +1982,10 @@ def _insert_track(
         """
         INSERT INTO tracks (
             id, path, path_hash, extension, file_size, file_mtime_ns,
-            title, artist, indexed_at
-        ) VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?)
+            title, artist, genre, indexed_at
+        ) VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?, ?)
         """,
-        (track_id, str(path), f"hash-{track_id}", path.suffix.lower(), title, artist, now),
+        (track_id, str(path), f"hash-{track_id}", path.suffix.lower(), title, artist, genre, now),
     )
     conn.execute(
         """
@@ -1189,9 +2005,9 @@ def _insert_track(
     conn.execute(
         """
         INSERT INTO tracks_fts (track_id, title, artist, album, genre, profile_text)
-        VALUES (?, ?, ?, NULL, NULL, ?)
+        VALUES (?, ?, ?, NULL, ?, ?)
         """,
-        (track_id, title, artist, profile_text),
+        (track_id, title, artist, genre, profile_text),
     )
     for source, tag, score in tags:
         conn.execute(

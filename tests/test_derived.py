@@ -40,6 +40,26 @@ def test_derive_context_fit_scores_club_and_background():
     assert ambient_scores["background"] > 0.80
 
 
+def test_double_time_raw_bpm_uses_perceived_tempo_for_feature_tags():
+    tags = {
+        tag.tag: tag.score
+        for tag in derive_feature_tags(
+            {
+                "bpm": 172.0,
+                "energy": 0.70,
+                "danceability": 0.70,
+                "aggression": 0.20,
+                "brightness": 0.45,
+                "vocalness": None,
+                "instrumentalness": None,
+            }
+        )
+    }
+
+    assert "fast" not in tags
+    assert tags["slow"] > 0.8
+
+
 def test_no_vocals_tag_requires_vocal_or_instrumental_evidence():
     no_vocal_evidence = {
         "bpm": 90.0,

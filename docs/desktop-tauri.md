@@ -98,8 +98,8 @@ The Tauri UI can:
 - reset failed/quarantined tracks for retry from advanced indexing actions
 - stream command stdout/stderr into an expandable live/raw output panel
 - parse natural-language intent
-- run concise JSON search with explanations, calibrated raw scores, confidence labels, duplicate suppression, no/weak-result suggestions, and a visible search-parameters panel
-- render search result cards with in-app audio playback via Tauri asset protocol and a Show action for revealing tracks in the file manager
+- run concise JSON search with explanations, calibrated raw scores, confidence labels, duplicate suppression, no/weak-result suggestions, rank/evidence details, evidence-source counts, and a visible search-parameters panel
+- render search result cards with in-app audio playback via Tauri asset protocol, a Show action for revealing tracks in the file manager, and a Matches action for local MatchReport candidates
 - save good/bad/neutral feedback from result cards
 - show LLM-provided hints separately from the final merged local intent when `--llm` is used
 - run the starter eval set from advanced indexing actions

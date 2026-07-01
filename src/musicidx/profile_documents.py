@@ -10,8 +10,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from musicidx.tempo import perceived_tempo_bpm, tempo_descriptors_from_metadata_and_tags
+
 PROFILE_SCHEMA_VERSION = 2
-PROFILE_VERSION = "2026-06-23.1"
+PROFILE_VERSION = "2026-07-01.1"
 
 IDENTITY_FIELDS = (
     "title",
@@ -72,7 +74,8 @@ def build_profile_document(
         field_confidence=field_confidence,
     )
     tag_rows = [_tag_dict(tag) for tag in (tags or [])]
-    musical = _musical_dict(audio_features or {})
+    tempo_descriptors = tempo_descriptors_from_metadata_and_tags(metadata_dict, tag_rows)
+    musical = _musical_dict(audio_features or {}, tempo_descriptors=tempo_descriptors)
     context_scores = {
         key: _clamp_score(value)
         for key, value in (context_fit or {}).items()
@@ -84,6 +87,7 @@ def build_profile_document(
         tags=tag_rows,
         context_fit=context_scores,
         profile_text=profile_text,
+        tempo_descriptors=tempo_descriptors,
     )
     warnings = _quality_warnings(
         metadata_dict,
@@ -157,6 +161,7 @@ def build_embedding_text(
     tags: list[Mapping[str, Any]],
     context_fit: Mapping[str, float] | None = None,
     profile_text: str,
+    tempo_descriptors: list[str] | None = None,
 ) -> str:
     """Build text optimized for semantic search over profile facts."""
     parts: list[str] = []
@@ -188,7 +193,7 @@ def build_embedding_text(
     if context_terms:
         parts.append("Fits contexts " + ", ".join(context_terms))
 
-    feature_text = _feature_embedding_text(audio_features)
+    feature_text = _feature_embedding_text(audio_features, tempo_descriptors=tempo_descriptors)
     if feature_text:
         parts.append(feature_text)
 
@@ -257,16 +262,22 @@ def _confidence_summary(
     return by_field
 
 
-def _musical_dict(audio_features: Mapping[str, Any]) -> dict[str, Any]:
+def _musical_dict(
+    audio_features: Mapping[str, Any],
+    *,
+    tempo_descriptors: list[str] | None = None,
+) -> dict[str, Any]:
     if not audio_features:
         return {}
-    bpm = _float_or_none(audio_features.get("bpm"))
+    raw_bpm = _float_or_none(audio_features.get("bpm"))
+    bpm = perceived_tempo_bpm(raw_bpm, descriptors=tempo_descriptors)
     key_name = audio_features.get("key_name")
     mode = audio_features.get("mode")
     return _without_none(
         {
             "bpm": {
                 "value": bpm,
+                "raw_value": raw_bpm if raw_bpm != bpm else None,
                 "bucket": _bpm_bucket(bpm),
             },
             "key": {
@@ -288,9 +299,16 @@ def _musical_dict(audio_features: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
-def _feature_embedding_text(audio_features: Mapping[str, Any]) -> str | None:
+def _feature_embedding_text(
+    audio_features: Mapping[str, Any],
+    *,
+    tempo_descriptors: list[str] | None = None,
+) -> str | None:
     parts: list[str] = []
-    bpm = _float_or_none(audio_features.get("bpm"))
+    bpm = perceived_tempo_bpm(
+        _float_or_none(audio_features.get("bpm")),
+        descriptors=tempo_descriptors,
+    )
     if bpm is not None:
         parts.append(f"around {bpm:.0f} BPM")
     for field in ("energy", "danceability", "aggression", "brightness"):
