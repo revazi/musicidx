@@ -8,15 +8,20 @@ embeddings are intentionally not used here.
 
 from __future__ import annotations
 
+import difflib
 import re
 import sqlite3
 import unicodedata
+import urllib.parse
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from musicidx.analyzer.embeddings import EmbeddingError, blob_to_vector, normalize_vector
+from musicidx.chromaprint_frames import row_frames
 
 
 class TrackMatchError(RuntimeError):
@@ -65,6 +70,12 @@ class MatchReport:
     identity_decision: str
     confidence: str
     confidence_score: float
+    candidate_score: float
+    candidate_kind: str
+    candidate_strength: str
+    candidate_summary: str
+    candidate_reasons: list[str]
+    candidate_scores: dict[str, float]
     reasons: list[str]
     evidence: list[MatchEvidence]
     warnings: list[str]
@@ -79,6 +90,12 @@ class MatchReport:
             "identity_decision": self.identity_decision,
             "confidence": self.confidence,
             "confidence_score": self.confidence_score,
+            "candidate_score": self.candidate_score,
+            "candidate_kind": self.candidate_kind,
+            "candidate_strength": self.candidate_strength,
+            "candidate_summary": self.candidate_summary,
+            "candidate_reasons": self.candidate_reasons,
+            "candidate_scores": self.candidate_scores,
             "reasons": self.reasons,
             "evidence": [item.as_dict() for item in self.evidence],
             "warnings": self.warnings,
@@ -106,11 +123,72 @@ VERSION_CONFLICT_ALIASES = {
 VERSION_CONFLICT_PHRASES = sorted(VERSION_CONFLICT_ALIASES, key=len, reverse=True)
 AUDIO_EMBEDDING_KIND = "audio_clap"
 AUDIO_SIMILARITY_THRESHOLD = 0.85
+CANDIDATE_SCORE_THRESHOLD = 0.03
+FEATURE_SIMILARITY_THRESHOLD = 0.74
+FINGERPRINT_RELATED_THRESHOLD = 0.08
+FINGERPRINT_SIMILARITY_THRESHOLD = 0.42
+FINGERPRINT_MAX_ALIGN_OFFSET = 120
+FINGERPRINT_MAX_BIT_ERROR = 2
+FINGERPRINT_ANCHOR_TOP_OFFSETS = 32
+FEATURE_SIMILARITY_FIELDS = (
+    "bpm",
+    "energy",
+    "valence",
+    "danceability",
+    "acousticness",
+    "instrumentalness",
+    "vocalness",
+    "speechiness",
+    "aggression",
+    "brightness",
+)
+CANDIDATE_SOURCE_PRIORITY = (
+    "content_hash",
+    "chromaprint",
+    "fingerprint_similarity",
+    "name",
+    "duration",
+    "artist_similarity",
+    "artist_title_norm",
+    "album_similarity",
+    "filename_stem",
+    "feature_similarity",
+    "audio_embedding",
+)
+MATCH_NAME_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "baby",
+    "feat",
+    "ft",
+    "i",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "the",
+    "to",
+    "u",
+    "you",
+    "your",
+}
 
 MATCH_POLICY = {
     "identity_authority": ["content_hash", "chromaprint"],
+    "candidate_ranking": list(CANDIDATE_SOURCE_PRIORITY),
+    "candidate_score_role": "closest-track-ranking-only_not_identity",
     "metadata_role": "advisory_only",
+    "filename_role": "advisory_only",
     "duration_role": "supporting_only",
+    "fingerprint_similarity_role": (
+        "soundwave_candidate_ranking_only_exact_chromaprint_still_required_for_identity"
+    ),
+    "features_role": "similarity_only_not_identity",
     "semantic_embeddings": "not_used_for_identity",
     "audio_embeddings": "similarity_only_not_identity",
     "llm": "not_used",
@@ -143,6 +221,12 @@ def compare_tracks(
     decision, identity_decision, confidence, confidence_score, reasons, warnings = _decision(
         evidence
     )
+    candidate_score, candidate_reasons, candidate_scores = _candidate_rank(evidence)
+    candidate_kind, candidate_strength, candidate_summary = _candidate_classification(
+        decision=decision,
+        candidate_score=candidate_score,
+        candidate_scores=candidate_scores,
+    )
     return MatchReport(
         schema_version=1,
         track_a=_match_track(left),
@@ -151,6 +235,12 @@ def compare_tracks(
         identity_decision=identity_decision,
         confidence=confidence,
         confidence_score=confidence_score,
+        candidate_score=candidate_score,
+        candidate_kind=candidate_kind,
+        candidate_strength=candidate_strength,
+        candidate_summary=candidate_summary,
+        candidate_reasons=candidate_reasons,
+        candidate_scores=candidate_scores,
         reasons=reasons,
         evidence=evidence,
         warnings=warnings,
@@ -175,6 +265,7 @@ def find_track_matches(
         source,
         include_missing=include_missing,
         audio_embedding_kind=audio_embedding_kind,
+        duration_tolerance_sec=duration_tolerance_sec,
     )
     reports = [
         compare_tracks(
@@ -187,17 +278,20 @@ def find_track_matches(
         )
         for row in candidates
     ]
-    reports = [report for report in reports if report.confidence_score > 0.0]
-    reports.sort(
-        key=lambda report: (
-            -report.confidence_score,
-            -_decision_priority(report.decision),
-            report.track_b.artist or "",
-            report.track_b.title or "",
-            report.track_b.path,
-        )
-    )
-    return reports[: max(1, limit)]
+    reports.sort(key=_candidate_sort_key)
+    max_results = max(1, limit)
+    minimum_results = min(5, max_results, len(reports))
+    selected = [report for report in reports if _is_informative_match_report(report)]
+    if len(selected) < minimum_results:
+        selected_ids = {report.track_b.track_id for report in selected}
+        for report in reports:
+            if report.track_b.track_id in selected_ids:
+                continue
+            selected.append(report)
+            selected_ids.add(report.track_b.track_id)
+            if len(selected) >= minimum_results:
+                break
+    return selected[:max_results]
 
 
 def _get_track(conn: sqlite3.Connection, track_id: str) -> sqlite3.Row:
@@ -205,6 +299,7 @@ def _get_track(conn: sqlite3.Connection, track_id: str) -> sqlite3.Row:
         """
         SELECT
             id, path, title, artist, album, content_hash, chromaprint,
+            chromaprint_algorithm, chromaprint_frames, chromaprint_frame_count,
             duration_sec, fingerprint_duration, artist_title_norm, missing_at
         FROM tracks
         WHERE id = ?
@@ -222,36 +317,11 @@ def _candidate_tracks_for_source(
     *,
     include_missing: bool,
     audio_embedding_kind: str,
+    duration_tolerance_sec: float,
 ) -> list[sqlite3.Row]:
+    del audio_embedding_kind, duration_tolerance_sec
     clauses = ["id != ?"]
     params: list[Any] = [source["id"]]
-    evidence_clauses: list[str] = []
-    for field_name in ("content_hash", "chromaprint", "artist_title_norm"):
-        value = _clean(source[field_name])
-        if value:
-            evidence_clauses.append(f"{field_name} = ?")
-            params.append(value)
-    artist = _clean(source["artist"]).casefold()
-    if artist:
-        evidence_clauses.append("lower(trim(artist)) = ?")
-        params.append(artist)
-    audio_models = _audio_embedding_models_for_track(
-        conn,
-        source["id"],
-        kind=audio_embedding_kind,
-    )
-    if audio_models:
-        placeholders = ", ".join("?" for _ in audio_models)
-        evidence_clauses.append(
-            "id IN ("
-            "SELECT track_id FROM embeddings "
-            f"WHERE kind = ? AND model IN ({placeholders})"
-            ")"
-        )
-        params.extend([audio_embedding_kind, *audio_models])
-    if not evidence_clauses:
-        return []
-    clauses.append("(" + " OR ".join(evidence_clauses) + ")")
     if not include_missing:
         clauses.append("missing_at IS NULL")
     return conn.execute(
@@ -259,7 +329,7 @@ def _candidate_tracks_for_source(
         SELECT id
         FROM tracks
         WHERE {' AND '.join(clauses)}
-        ORDER BY coalesce(artist, ''), coalesce(title, ''), path
+        ORDER BY coalesce(title, ''), coalesce(artist, ''), path
         """,
         params,
     ).fetchall()
@@ -278,9 +348,11 @@ def _match_track(row: sqlite3.Row) -> MatchTrack:
         identity={
             "content_hash": bool(_clean(row["content_hash"])),
             "chromaprint": bool(_clean(row["chromaprint"])),
+            "chromaprint_frames": bool(row_frames(row)),
             "duration_sec": row["duration_sec"] is not None,
             "fingerprint_duration": row["fingerprint_duration"] is not None,
             "artist_title_norm": bool(_clean(row["artist_title_norm"])),
+            "filename_stem": bool(_filename_stem(row["path"])),
         },
     )
 
@@ -295,6 +367,7 @@ def _match_evidence(
     audio_similarity_threshold: float,
 ) -> list[MatchEvidence]:
     evidence = [
+        _name_evidence(left, right),
         _string_identity_evidence(
             "content_hash",
             left["content_hash"],
@@ -311,7 +384,9 @@ def _match_evidence(
             match_score=0.96,
             decisive_on_match=True,
         ),
+        _fingerprint_similarity_evidence(left, right),
         _duration_evidence(left, right, duration_tolerance_sec=duration_tolerance_sec),
+        _metadata_text_similarity_evidence("artist_similarity", left["artist"], right["artist"]),
         _string_identity_evidence(
             "artist_title_norm",
             left["artist_title_norm"],
@@ -320,6 +395,9 @@ def _match_evidence(
             match_score=0.55,
             decisive_on_match=False,
         ),
+        _metadata_text_similarity_evidence("album_similarity", left["album"], right["album"]),
+        _filename_stem_evidence(left, right),
+        _feature_similarity_evidence(conn, left["id"], right["id"]),
         _version_conflict_evidence(left, right),
         _audio_embedding_evidence(
             conn,
@@ -364,6 +442,41 @@ def _string_identity_evidence(
     )
 
 
+def _name_evidence(left: sqlite3.Row, right: sqlite3.Row) -> MatchEvidence:
+    left_names = _track_name_candidates(left)
+    right_names = _track_name_candidates(right)
+    if not left_names or not right_names:
+        return MatchEvidence(
+            source="name",
+            role="candidate_ranking_only",
+            status="missing",
+            score=0.0,
+            decisive=False,
+            details={"left_available": bool(left_names), "right_available": bool(right_names)},
+        )
+    best: tuple[float, str, str] = (0.0, left_names[0], right_names[0])
+    for left_name in left_names:
+        for right_name in right_names:
+            score = _name_similarity(left_name, right_name)
+            if score > best[0]:
+                best = (score, left_name, right_name)
+    score, left_name, right_name = best
+    if score >= 0.88:
+        status = "match"
+    elif score >= 0.45:
+        status = "partial"
+    else:
+        status = "mismatch"
+    return MatchEvidence(
+        source="name",
+        role="candidate_ranking_only",
+        status=status,
+        score=round(score, 6),
+        decisive=False,
+        details={"left_name": _short_key(left_name), "right_name": _short_key(right_name)},
+    )
+
+
 def _duration_evidence(
     left: sqlite3.Row,
     right: sqlite3.Row,
@@ -387,7 +500,7 @@ def _duration_evidence(
         )
     delta = abs(left_duration - right_duration)
     matched = delta <= duration_tolerance_sec
-    score = max(0.0, 1.0 - (delta / max(duration_tolerance_sec, 1.0))) if matched else 0.0
+    score = max(0.0, 1.0 - (delta / max(duration_tolerance_sec * 4.0, 12.0)))
     return MatchEvidence(
         source="duration",
         role="supporting_only",
@@ -510,6 +623,163 @@ def _audio_embedding_evidence(
     )
 
 
+def _metadata_text_similarity_evidence(
+    source: str,
+    left_value: Any,
+    right_value: Any,
+) -> MatchEvidence:
+    left = _normalized_text(left_value)
+    right = _normalized_text(right_value)
+    if not left or not right:
+        return MatchEvidence(
+            source=source,
+            role="metadata_advisory",
+            status="missing",
+            score=0.0,
+            decisive=False,
+            details={"left_available": bool(left), "right_available": bool(right)},
+        )
+    score = _name_similarity(left, right)
+    if score >= 0.92:
+        status = "match"
+    elif score >= 0.70:
+        status = "partial"
+    else:
+        status = "mismatch"
+    return MatchEvidence(
+        source=source,
+        role="metadata_advisory",
+        status=status,
+        score=round(score, 6),
+        decisive=False,
+        details={"left_value": _short_key(left), "right_value": _short_key(right)},
+    )
+
+
+def _fingerprint_similarity_evidence(left: sqlite3.Row, right: sqlite3.Row) -> MatchEvidence:
+    left_fingerprint = _clean(left["chromaprint"])
+    right_fingerprint = _clean(right["chromaprint"])
+    left_frames = row_frames(left)
+    right_frames = row_frames(right)
+    if not left_frames or not right_frames:
+        return MatchEvidence(
+            source="fingerprint_similarity",
+            role="soundwave_candidate_ranking_only",
+            status="missing",
+            score=0.0,
+            decisive=False,
+            details={
+                "left_available": bool(left_frames),
+                "right_available": bool(right_frames),
+                "left_encoded_available": bool(left_fingerprint),
+                "right_encoded_available": bool(right_fingerprint),
+            },
+        )
+    score, details = _chromaprint_similarity(left_frames, right_frames)
+    if left_fingerprint == right_fingerprint:
+        status = "same"
+    elif score >= FINGERPRINT_SIMILARITY_THRESHOLD:
+        status = "similar"
+    elif score >= FINGERPRINT_RELATED_THRESHOLD:
+        status = "related"
+    else:
+        status = "dissimilar"
+    return MatchEvidence(
+        source="fingerprint_similarity",
+        role="soundwave_candidate_ranking_only",
+        status=status,
+        score=round(score, 6),
+        decisive=False,
+        details={
+            "related_threshold": FINGERPRINT_RELATED_THRESHOLD,
+            "similar_threshold": FINGERPRINT_SIMILARITY_THRESHOLD,
+            "left_key": _short_key(left_fingerprint),
+            "right_key": _short_key(right_fingerprint),
+            **details,
+        },
+    )
+
+
+def _filename_stem_evidence(left: sqlite3.Row, right: sqlite3.Row) -> MatchEvidence:
+    left_stem = _filename_stem(left["path"])
+    right_stem = _filename_stem(right["path"])
+    if not left_stem or not right_stem:
+        return MatchEvidence(
+            source="filename_stem",
+            role="metadata_advisory",
+            status="missing",
+            score=0.0,
+            decisive=False,
+            details={"left_available": bool(left_stem), "right_available": bool(right_stem)},
+        )
+    matched = left_stem == right_stem
+    return MatchEvidence(
+        source="filename_stem",
+        role="metadata_advisory",
+        status="match" if matched else "mismatch",
+        score=0.35 if matched else 0.0,
+        decisive=False,
+        details={"left_stem": _short_key(left_stem), "right_stem": _short_key(right_stem)},
+    )
+
+
+def _feature_similarity_evidence(
+    conn: sqlite3.Connection,
+    left_track_id: str,
+    right_track_id: str,
+) -> MatchEvidence:
+    rows = conn.execute(
+        f"""
+        SELECT track_id, {', '.join(FEATURE_SIMILARITY_FIELDS)}
+        FROM audio_features
+        WHERE track_id IN (?, ?)
+        """,
+        (left_track_id, right_track_id),
+    ).fetchall()
+    by_track = {row["track_id"]: row for row in rows}
+    left = by_track.get(left_track_id)
+    right = by_track.get(right_track_id)
+    if left is None or right is None:
+        return MatchEvidence(
+            source="feature_similarity",
+            role="similarity_only",
+            status="missing",
+            score=0.0,
+            decisive=False,
+            details={"left_available": left is not None, "right_available": right is not None},
+        )
+
+    scores: dict[str, float] = {}
+    for field in FEATURE_SIMILARITY_FIELDS:
+        left_value = left[field]
+        right_value = right[field]
+        if left_value is None or right_value is None:
+            continue
+        scores[field] = _feature_value_similarity(field, float(left_value), float(right_value))
+    if not scores:
+        return MatchEvidence(
+            source="feature_similarity",
+            role="similarity_only",
+            status="missing",
+            score=0.0,
+            decisive=False,
+            details={"shared_fields": []},
+        )
+    score = sum(scores.values()) / len(scores)
+    return MatchEvidence(
+        source="feature_similarity",
+        role="similarity_only",
+        status="similar" if score >= FEATURE_SIMILARITY_THRESHOLD else "dissimilar",
+        score=round(score, 6),
+        decisive=False,
+        details={
+            "threshold": FEATURE_SIMILARITY_THRESHOLD,
+            "shared_fields": sorted(scores),
+            "field_scores": {key: round(value, 6) for key, value in sorted(scores.items())},
+        },
+    )
+
+
 def _version_conflict_evidence(left: sqlite3.Row, right: sqlite3.Row) -> MatchEvidence:
     left_artist = _normalized_text(left["artist"])
     right_artist = _normalized_text(right["artist"])
@@ -568,6 +838,154 @@ def _base_title_and_version_tokens(title: str) -> tuple[str, set[str]]:
     return base, tokens
 
 
+def _track_name_candidates(row: sqlite3.Row) -> list[str]:
+    title = _normalized_text(row["title"])
+    artist_title = _normalized_text(
+        " ".join(part for part in [row["artist"], row["title"]] if part)
+    )
+    return _unique_non_empty([title, artist_title])
+
+
+def _name_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    substring_score = 0.0
+    if left in right or right in left:
+        substring_score = min(len(left), len(right)) / max(len(left), len(right), 1)
+        substring_score = max(0.72, min(0.96, substring_score))
+    token_score = _token_similarity(left, right)
+    sequence_score = difflib.SequenceMatcher(None, left, right, autojunk=False).ratio()
+    if substring_score == 0.0 and token_score == 0.0 and sequence_score < 0.62:
+        sequence_score = 0.0
+    return max(substring_score, token_score, sequence_score)
+
+
+def _token_similarity(left: str, right: str) -> float:
+    left_tokens = _content_name_tokens(left)
+    right_tokens = _content_name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap_tokens = left_tokens.intersection(right_tokens)
+    if not overlap_tokens:
+        return 0.0
+    overlap = len(overlap_tokens)
+    union = len(left_tokens.union(right_tokens))
+    containment = overlap / min(len(left_tokens), len(right_tokens))
+    jaccard = overlap / union
+    score = max(jaccard, containment * 0.92)
+    if overlap == 1:
+        score = min(score, 0.42)
+    return score
+
+
+def _content_name_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in value.split()
+        if len(token) > 1 and token not in MATCH_NAME_STOP_WORDS
+    }
+
+
+def _chromaprint_similarity(
+    left_frames: tuple[int, ...],
+    right_frames: tuple[int, ...],
+) -> tuple[float, dict[str, Any]]:
+    if not left_frames or not right_frames:
+        return 0.0, {"method": "decoded_chromaprint_alignment", "decoded": False}
+    if left_frames == right_frames:
+        return 1.0, {
+            "method": "decoded_chromaprint_alignment",
+            "decoded": True,
+            "left_frames": len(left_frames),
+            "right_frames": len(right_frames),
+            "best_offset": 0,
+            "best_matches": min(len(left_frames), len(right_frames)),
+        }
+    score, best_offset, best_matches = _fingerprint_alignment_score(left_frames, right_frames)
+    return round(score, 6), {
+        "method": "decoded_chromaprint_alignment",
+        "decoded": True,
+        "left_frames": len(left_frames),
+        "right_frames": len(right_frames),
+        "max_bit_error": FINGERPRINT_MAX_BIT_ERROR,
+        "best_offset": best_offset,
+        "best_matches": best_matches,
+    }
+
+
+def _fingerprint_alignment_score(
+    left: tuple[int, ...],
+    right: tuple[int, ...],
+) -> tuple[float, int, int]:
+    if not left or not right:
+        return 0.0, 0, 0
+    candidate_offsets = set(_local_fingerprint_offsets(left, right))
+    candidate_offsets.update(_anchor_fingerprint_offsets(left, right))
+    candidate_offsets.add(0)
+    best_score = 0.0
+    best_offset = 0
+    best_matches = 0
+    denominator = max(1, min(len(left), len(right)))
+    for offset in candidate_offsets:
+        matches = _fingerprint_matches_at_offset(left, right, offset)
+        score = matches / denominator
+        if score > best_score or (score == best_score and matches > best_matches):
+            best_score = score
+            best_offset = offset
+            best_matches = matches
+    return min(1.0, best_score), best_offset, best_matches
+
+
+def _local_fingerprint_offsets(left: tuple[int, ...], right: tuple[int, ...]) -> list[int]:
+    counts: Counter[int] = Counter()
+    for left_index, left_frame in enumerate(left):
+        right_begin = max(0, left_index - FINGERPRINT_MAX_ALIGN_OFFSET)
+        right_end = min(len(right), left_index + FINGERPRINT_MAX_ALIGN_OFFSET)
+        for right_index in range(right_begin, right_end):
+            if (left_frame ^ right[right_index]).bit_count() <= FINGERPRINT_MAX_BIT_ERROR:
+                counts[left_index - right_index] += 1
+    return [offset for offset, _count in counts.most_common(FINGERPRINT_ANCHOR_TOP_OFFSETS)]
+
+
+def _anchor_fingerprint_offsets(left: tuple[int, ...], right: tuple[int, ...]) -> list[int]:
+    positions: dict[int, list[int]] = defaultdict(list)
+    for right_index, right_frame in enumerate(right):
+        if len(positions[right_frame]) < 64:
+            positions[right_frame].append(right_index)
+    counts: Counter[int] = Counter()
+    step = max(1, len(left) // 1500)
+    for left_index in range(0, len(left), step):
+        for right_index in positions.get(left[left_index], []):
+            counts[left_index - right_index] += 1
+    return [offset for offset, _count in counts.most_common(FINGERPRINT_ANCHOR_TOP_OFFSETS)]
+
+
+def _fingerprint_matches_at_offset(
+    left: tuple[int, ...],
+    right: tuple[int, ...],
+    offset: int,
+) -> int:
+    left_start = max(0, offset)
+    left_end = min(len(left), len(right) + offset)
+    if left_end <= left_start:
+        return 0
+    matches = 0
+    for left_index in range(left_start, left_end):
+        right_index = left_index - offset
+        if (left[left_index] ^ right[right_index]).bit_count() <= FINGERPRINT_MAX_BIT_ERROR:
+            matches += 1
+    return matches
+
+
+def _feature_value_similarity(field: str, left: float, right: float) -> float:
+    delta = abs(left - right)
+    if field == "bpm":
+        return max(0.0, 1.0 - (delta / 80.0))
+    return max(0.0, 1.0 - min(1.0, delta))
+
+
 def _normalized_text(value: Any) -> str:
     text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode()
     text = text.casefold().replace("&", " and ")
@@ -583,6 +1001,7 @@ def _decision(
     chromaprint = by_source["chromaprint"]
     duration = by_source["duration"]
     artist_title = by_source["artist_title_norm"]
+    filename_stem = by_source["filename_stem"]
     version_conflict = by_source["version_conflict"]
     audio_embedding = by_source["audio_embedding"]
     warnings: list[str] = []
@@ -639,6 +1058,9 @@ def _decision(
         if artist_title.status == "match":
             reasons.append("artist/title metadata matches but is advisory only")
             warnings.append("metadata_match_blocked_by_identity_mismatch")
+        if filename_stem.status == "match":
+            reasons.append("filename stem matches but is advisory only")
+            warnings.append("filename_match_blocked_by_identity_mismatch")
         return (
             "no_identity_match",
             "unknown",
@@ -668,6 +1090,26 @@ def _decision(
             ["same artist/title metadata"],
             warnings,
         )
+    if filename_stem.status == "match" and duration.status == "match":
+        warnings.append("filename_duration_match_is_advisory_only")
+        return (
+            "possible_metadata_match",
+            "possible",
+            "low",
+            0.52,
+            ["same filename stem and similar duration"],
+            warnings,
+        )
+    if filename_stem.status == "match":
+        warnings.append("filename_match_is_advisory_only")
+        return (
+            "possible_metadata_match",
+            "possible",
+            "low",
+            0.25,
+            ["same filename stem"],
+            warnings,
+        )
 
     if audio_embedding.status == "similar":
         warnings.append("audio_embedding_similarity_only")
@@ -691,6 +1133,167 @@ def _decision(
         ["no authoritative identity match found"],
         warnings,
     )
+
+
+def _candidate_rank(
+    evidence: list[MatchEvidence],
+) -> tuple[float, list[str], dict[str, float]]:
+    by_source = {item.source: item for item in evidence}
+    candidate_scores = {
+        source: _candidate_source_score(by_source.get(source))
+        for source in CANDIDATE_SOURCE_PRIORITY
+    }
+    weights = {
+        "content_hash": 0.20,
+        "chromaprint": 0.20,
+        "fingerprint_similarity": 0.25,
+        "name": 0.16,
+        "duration": 0.07,
+        "artist_similarity": 0.05,
+        "artist_title_norm": 0.04,
+        "album_similarity": 0.02,
+        "filename_stem": 0.02,
+        "feature_similarity": 0.03,
+        "audio_embedding": 0.02,
+    }
+    score = min(
+        1.0,
+        sum(candidate_scores[source] * weights[source] for source in CANDIDATE_SOURCE_PRIORITY),
+    )
+    reasons = [
+        _candidate_reason(source, by_source[source], candidate_scores[source])
+        for source in CANDIDATE_SOURCE_PRIORITY
+        if source in by_source and candidate_scores[source] > 0.0
+    ]
+    return (
+        round(score, 6),
+        reasons[:6],
+        {source: round(value, 6) for source, value in candidate_scores.items()},
+    )
+
+
+def _candidate_classification(
+    *,
+    decision: str,
+    candidate_score: float,
+    candidate_scores: dict[str, float],
+) -> tuple[str, str, str]:
+    name = candidate_scores.get("name", 0.0)
+    content = candidate_scores.get("content_hash", 0.0)
+    chromaprint = candidate_scores.get("chromaprint", 0.0)
+    fingerprint = candidate_scores.get("fingerprint_similarity", 0.0)
+    duration = candidate_scores.get("duration", 0.0)
+    artist = candidate_scores.get("artist_similarity", 0.0)
+    artist_title = candidate_scores.get("artist_title_norm", 0.0)
+    album = candidate_scores.get("album_similarity", 0.0)
+    filename = candidate_scores.get("filename_stem", 0.0)
+    features = candidate_scores.get("feature_similarity", 0.0)
+    audio = candidate_scores.get("audio_embedding", 0.0)
+
+    if decision == "exact_duplicate" or content >= 1.0:
+        return ("exact_duplicate", "strong", "Exact duplicate: same content hash")
+    if decision == "same_recording" or chromaprint >= 0.95:
+        return ("same_recording", "strong", "Same recording: exact fingerprint match")
+    if decision == "possible_recording_match" or fingerprint >= FINGERPRINT_SIMILARITY_THRESHOLD:
+        return ("possible_recording_match", "strong", "Possible recording match: close fingerprint")
+    if fingerprint >= FINGERPRINT_RELATED_THRESHOLD:
+        return ("soundwave_related", "medium", "Soundwave-related: partial fingerprint overlap")
+    if decision == "related_version_not_duplicate":
+        return ("related_version", "medium", "Related version/remix/live/edit, not a duplicate")
+    if name >= 0.88 and artist >= 0.92:
+        strength = "strong" if duration >= 0.75 or features >= 0.90 else "medium"
+        return ("same_title_artist", strength, "Same/very close title and artist")
+    if name >= 0.88 and artist_title > 0.0:
+        return ("same_title_metadata", "medium", "Same/very close title with metadata support")
+    if name >= 0.88:
+        return ("same_title", "medium", "Same/very close title")
+    if name >= 0.70:
+        return ("close_title", "medium", "Close title match")
+    if artist >= 0.92 and (duration >= 0.75 or album >= 0.80):
+        return ("same_artist_context", "medium", "Same artist with duration/album support")
+    if filename >= 0.30:
+        return ("filename_match", "medium", "Same/close filename")
+    if audio >= AUDIO_SIMILARITY_THRESHOLD:
+        return ("audio_similar", "weak", "Audio embedding similarity only")
+    if features >= 0.90:
+        return ("feature_similar", "weak", "Feature-similar fallback")
+    if duration >= 0.75:
+        return ("duration_similar", "weak", "Duration-similar fallback")
+    if candidate_score > 0.0:
+        return ("nearest_fallback", "weak", "Weak nearest fallback")
+    return ("no_nearby_signal", "weak", "No strong nearby signal")
+
+
+def _candidate_source_score(evidence: MatchEvidence | None) -> float:
+    if evidence is None:
+        return 0.0
+    if evidence.source == "fingerprint_similarity":
+        if evidence.status not in {"same", "similar", "related"}:
+            return 0.0
+        return max(0.0, min(1.0, float(evidence.score or 0.0)))
+    raw_similarity_sources = {"duration", "feature_similarity", "audio_embedding"}
+    if evidence.source in raw_similarity_sources and evidence.status not in {"missing", "error"}:
+        return max(0.0, min(1.0, float(evidence.score or 0.0)))
+    if evidence.status not in {"match", "partial", "same", "similar"}:
+        return 0.0
+    return max(0.0, min(1.0, float(evidence.score or 0.0)))
+
+
+def _candidate_reason(source: str, evidence: MatchEvidence, score: float) -> str:
+    labels = {
+        "name": "name",
+        "content_hash": "content hash",
+        "chromaprint": "exact fingerprint",
+        "fingerprint_similarity": "fingerprint similarity",
+        "duration": "duration",
+        "artist_similarity": "artist",
+        "artist_title_norm": "artist/title metadata",
+        "album_similarity": "album",
+        "filename_stem": "filename",
+        "feature_similarity": "features",
+        "audio_embedding": "audio embedding",
+    }
+    return f"{labels.get(source, source)} {evidence.status} {score:.2f}"
+
+
+def _candidate_sort_key(report: MatchReport) -> tuple[Any, ...]:
+    scores = report.candidate_scores
+    exact_soundwave_score = max(
+        scores.get("content_hash", 0.0),
+        scores.get("chromaprint", 0.0),
+    )
+    fuzzy_soundwave_score = scores.get("fingerprint_similarity", 0.0)
+    return (
+        -report.candidate_score,
+        -exact_soundwave_score,
+        -fuzzy_soundwave_score,
+        -scores.get("name", 0.0),
+        -scores.get("duration", 0.0),
+        -scores.get("artist_similarity", 0.0),
+        -scores.get("artist_title_norm", 0.0),
+        -scores.get("album_similarity", 0.0),
+        -scores.get("filename_stem", 0.0),
+        -scores.get("feature_similarity", 0.0),
+        -scores.get("audio_embedding", 0.0),
+        -_decision_priority(report.decision),
+        report.track_b.artist or "",
+        report.track_b.title or "",
+        report.track_b.path,
+    )
+
+
+def _is_informative_match_report(report: MatchReport) -> bool:
+    if report.candidate_score >= CANDIDATE_SCORE_THRESHOLD:
+        return True
+    if report.confidence_score > 0.0:
+        return True
+    if report.decision != "no_identity_match":
+        return False
+    informative_warnings = {
+        "metadata_match_blocked_by_identity_mismatch",
+        "filename_match_blocked_by_identity_mismatch",
+    }
+    return bool(informative_warnings.intersection(report.warnings))
 
 
 def _decision_priority(decision: str) -> int:
@@ -722,6 +1325,24 @@ def _optional_float(value: Any) -> float | None:
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _filename_stem(path: Any) -> str:
+    decoded_path = urllib.parse.unquote(str(path or ""))
+    stem = Path(decoded_path).stem
+    return _normalized_text(stem)
+
+
+def _unique_non_empty(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        output.append(cleaned)
+    return output
 
 
 def _short_key(value: str) -> str:

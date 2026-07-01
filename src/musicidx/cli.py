@@ -36,6 +36,7 @@ from musicidx.analyzer.essentia_models import (
     model_manifest_status,
     process_tags,
 )
+from musicidx.browse import browse_library
 from musicidx.config import (
     DB_PATH_ENV_VAR,
     DEFAULT_DB_FILENAME,
@@ -155,6 +156,10 @@ MatchEvalFileArg = Annotated[Path, typer.Argument(help="JSON match eval file.")]
 LimitOption = Annotated[
     int,
     typer.Option("--limit", min=1, max=100, help="Maximum number of results."),
+]
+BrowseLimitOption = Annotated[
+    int,
+    typer.Option("--limit", min=1, max=500, help="Maximum number of direct track rows to return."),
 ]
 OptionalLimitOption = Annotated[
     int | None,
@@ -759,6 +764,89 @@ def index_health_command(
         console.print("[bold]Recommended actions:[/bold]")
         for action in payload["recommended_actions"]:
             console.print(f"- {action}")
+
+
+@app.command("browse")
+def browse_command(
+    db: DbOption = None,
+    path: Annotated[
+        Path | None,
+        typer.Option("--path", help="Indexed folder/root to browse or search under."),
+    ] = None,
+    query: Annotated[
+        str | None,
+        typer.Option("--query", help="Simple keyword search across title/artist/album/genre/path."),
+    ] = None,
+    sort: Annotated[
+        str,
+        typer.Option(
+            "--sort",
+            help="Sort by artist, title, album, genre, bpm, duration, path, or indexed_at.",
+        ),
+    ] = "artist",
+    desc: Annotated[bool, typer.Option("--desc", help="Sort descending.")] = False,
+    offset: Annotated[
+        int,
+        typer.Option("--offset", min=0, help="Track result offset for pagination."),
+    ] = 0,
+    include_missing: IncludeMissingOption = False,
+    limit: BrowseLimitOption = 200,
+    json_output: JsonOption = False,
+) -> None:
+    """Browse or simple-search indexed roots/folders/tracks from SQLite."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        payload = {
+            "db_path": str(db_path),
+            **browse_library(
+                conn,
+                path=path,
+                query=query,
+                sort=sort,
+                direction="desc" if desc else "asc",
+                include_missing=include_missing,
+                limit=limit,
+                offset=offset,
+            ),
+        }
+    finally:
+        conn.close()
+
+    if json_output:
+        _print_json(payload)
+        return
+
+    heading = "Library search" if payload.get("mode") == "search" else "Library browser"
+    console.print(f"[bold]{heading}:[/bold] {payload.get('cwd') or 'no indexed roots'}")
+    if payload.get("query"):
+        console.print(
+            f"Query: {payload['query']} · sort: {payload['sort']} "
+            f"{payload['sort_direction']}"
+        )
+    if payload.get("warning"):
+        console.print(f"[yellow]{payload['warning']}[/yellow]")
+    if payload["roots"]:
+        console.print("[bold]Roots:[/bold]")
+        for root in payload["roots"]:
+            console.print(f"- {root['path']} ({root['track_count']} tracks)")
+    if payload["folders"]:
+        console.print("[bold]Folders:[/bold]")
+        for folder in payload["folders"]:
+            console.print(f"- {folder['name']} ({folder['track_count']} tracks)")
+    if payload["tracks"]:
+        table = Table(title="Tracks")
+        table.add_column("Artist")
+        table.add_column("Title")
+        table.add_column("Path")
+        for track in payload["tracks"]:
+            table.add_row(
+                track.get("artist") or "",
+                track.get("title") or "",
+                track.get("path") or "",
+            )
+        console.print(table)
 
 
 @app.command("failed")
@@ -2526,8 +2614,16 @@ def _print_match_report(report: dict[str, Any]) -> None:
     table.add_column("Value")
     table.add_row("decision", report["decision"])
     table.add_row("identity", report["identity_decision"])
-    table.add_row("confidence", f"{report['confidence']} ({report['confidence_score']:.2f})")
-    table.add_row("reasons", "; ".join(report.get("reasons") or []))
+    table.add_row(
+        "identity confidence",
+        f"{report['confidence']} ({report['confidence_score']:.2f})",
+    )
+    table.add_row("candidate kind", str(report.get("candidate_kind") or "unknown"))
+    table.add_row("candidate strength", str(report.get("candidate_strength") or "weak"))
+    table.add_row("candidate summary", str(report.get("candidate_summary") or ""))
+    table.add_row("candidate score", f"{float(report.get('candidate_score') or 0.0):.2f}")
+    table.add_row("candidate reasons", "; ".join(report.get("candidate_reasons") or []))
+    table.add_row("identity reasons", "; ".join(report.get("reasons") or []))
     if report.get("warnings"):
         table.add_row("warnings", "; ".join(report["warnings"]))
     console.print(table)

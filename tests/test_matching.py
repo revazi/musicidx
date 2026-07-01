@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import array
 import json
 from pathlib import Path
 
+import chromaprint
 from typer.testing import CliRunner
 
 from musicidx.analyzer.embeddings import vector_to_blob
@@ -53,6 +55,8 @@ def test_compare_tracks_exact_content_hash_is_authoritative(tmp_path):
         evidence = {item.source: item for item in report.evidence}
         assert evidence["content_hash"].status == "match"
         assert evidence["content_hash"].decisive is True
+        assert report.candidate_kind == "exact_duplicate"
+        assert report.candidate_strength == "strong"
         assert report.policy["semantic_embeddings"] == "not_used_for_identity"
         assert report.policy["llm"] == "not_used"
     finally:
@@ -197,6 +201,7 @@ def test_match_track_finds_audio_embedding_similarity_candidates(tmp_path):
 
         assert [report.track_b.track_id for report in reports] == ["track-b"]
         assert reports[0].decision == "sound_similar_only"
+        assert reports[0].candidate_scores["audio_embedding"] > 0.9
     finally:
         conn.close()
 
@@ -300,8 +305,9 @@ def test_find_track_matches_includes_related_version_candidates(tmp_path):
 
         reports = find_track_matches(conn, "studio")
 
-        assert [report.track_b.track_id for report in reports] == ["remix"]
+        assert reports[0].track_b.track_id == "remix"
         assert reports[0].decision == "related_version_not_duplicate"
+        assert "other" in {report.track_b.track_id for report in reports}
     finally:
         conn.close()
 
@@ -332,10 +338,303 @@ def test_find_track_matches_returns_deterministic_candidates(tmp_path):
         reports = find_track_matches(conn, "source")
         metadata_reports = find_track_matches(conn, "metadata-source")
 
-        assert [report.track_b.track_id for report in reports] == ["exact"]
+        assert reports[0].track_b.track_id == "exact"
         assert reports[0].decision == "exact_duplicate"
-        assert [report.track_b.track_id for report in metadata_reports] == ["metadata"]
+        assert metadata_reports[0].track_b.track_id == "metadata"
         assert metadata_reports[0].decision == "possible_metadata_match"
+    finally:
+        conn.close()
+
+
+def test_find_track_matches_includes_filename_stem_candidates_as_advisory(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "Track A.mp3",
+            duration_sec=180.0,
+        )
+        _insert_track(
+            conn,
+            "copy",
+            tmp_path / "Track%20A.mp3",
+            duration_sec=181.0,
+        )
+
+        reports = find_track_matches(conn, "source")
+
+        assert [report.track_b.track_id for report in reports] == ["copy"]
+        assert reports[0].decision == "possible_metadata_match"
+        assert reports[0].identity_decision == "possible"
+        assert "filename_duration_match_is_advisory_only" in reports[0].warnings
+        evidence = {item.source: item for item in reports[0].evidence}
+        assert evidence["filename_stem"].status == "match"
+        assert evidence["filename_stem"].decisive is False
+    finally:
+        conn.close()
+
+
+def test_filename_stem_match_cannot_override_fingerprint_mismatch(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "Track A.mp3",
+            chromaprint="fp-a",
+            duration_sec=180.0,
+        )
+        _insert_track(
+            conn,
+            "copy",
+            tmp_path / "Track%20A.mp3",
+            chromaprint="fp-b",
+            duration_sec=180.5,
+        )
+
+        report = compare_tracks(conn, "source", "copy")
+        reports = find_track_matches(conn, "source")
+
+        assert report.decision == "no_identity_match"
+        assert "filename_match_blocked_by_identity_mismatch" in report.warnings
+        assert [item.track_b.track_id for item in reports] == ["copy"]
+        assert reports[0].decision == "no_identity_match"
+        assert reports[0].confidence_score == 0.0
+    finally:
+        conn.close()
+
+
+def test_name_similarity_ignores_generic_token_overlap(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "source.mp3",
+            title="Love To Love You Baby",
+            artist="Donna Summer",
+        )
+        _insert_track(
+            conn,
+            "generic-overlap",
+            tmp_path / "generic.mp3",
+            title="Only You",
+            artist="Steve Monite",
+        )
+
+        report = compare_tracks(conn, "source", "generic-overlap")
+
+        evidence = {item.source: item for item in report.evidence}
+        assert evidence["name"].status == "mismatch"
+        assert evidence["name"].score < 0.45
+    finally:
+        conn.close()
+
+
+def test_name_similarity_caps_single_shared_content_word(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "source.mp3",
+            title="Love To Love You Baby",
+            artist="Donna Summer",
+        )
+        _insert_track(
+            conn,
+            "single-word-overlap",
+            tmp_path / "single.mp3",
+            title="Water Of Love",
+            artist="Dire Straits",
+        )
+
+        report = compare_tracks(conn, "source", "single-word-overlap")
+
+        evidence = {item.source: item for item in report.evidence}
+        assert evidence["name"].score <= 0.42
+        assert evidence["name"].status == "mismatch"
+    finally:
+        conn.close()
+
+
+def test_find_track_matches_pads_to_five_nearest_candidates(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(conn, "source", tmp_path / "source.mp3", title="Source Song")
+        for index in range(1, 7):
+            _insert_track(
+                conn,
+                f"candidate-{index}",
+                tmp_path / f"candidate-{index}.mp3",
+                title=f"Candidate {index}",
+                duration_sec=120.0 + index,
+            )
+
+        reports = find_track_matches(conn, "source", limit=5)
+
+        assert len(reports) == 5
+        scores = [report.candidate_score for report in reports]
+        assert scores == sorted(scores, reverse=True)
+    finally:
+        conn.close()
+
+
+def test_dissimilar_fingerprint_noise_does_not_rank_candidate(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "source.mp3",
+            title="Source",
+            chromaprint=_encoded_fingerprint([index for index in range(300)]),
+        )
+        _insert_track(
+            conn,
+            "different-fp",
+            tmp_path / "different.mp3",
+            title="Different",
+            chromaprint=_encoded_fingerprint([index + 10_000 for index in range(300)]),
+        )
+
+        report = compare_tracks(conn, "source", "different-fp")
+
+        evidence = {item.source: item for item in report.evidence}
+        assert evidence["fingerprint_similarity"].status == "dissimilar"
+        assert report.candidate_scores["fingerprint_similarity"] == 0.0
+    finally:
+        conn.close()
+
+
+def test_find_track_matches_uses_artist_metadata_after_title(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "source.mp3",
+            title="Shared Song",
+            artist="Artist A",
+            duration_sec=180.0,
+        )
+        _insert_track(
+            conn,
+            "same-title-same-artist",
+            tmp_path / "same-artist.mp3",
+            title="Shared Song",
+            artist="Artist A",
+            duration_sec=180.0,
+        )
+        _insert_track(
+            conn,
+            "same-title-different-artist",
+            tmp_path / "different-artist.mp3",
+            title="Shared Song",
+            artist="Artist B",
+            duration_sec=180.0,
+        )
+
+        reports = find_track_matches(conn, "source", limit=5)
+
+        assert reports[0].track_b.track_id == "same-title-same-artist"
+        assert reports[0].candidate_kind == "same_title_artist"
+        assert reports[0].candidate_strength == "strong"
+        assert reports[0].candidate_scores["artist_similarity"] == 1.0
+        assert reports[1].track_b.track_id == "same-title-different-artist"
+        assert reports[1].candidate_scores["artist_similarity"] < 1.0
+    finally:
+        conn.close()
+
+
+def test_find_track_matches_uses_feature_similarity_after_name_fingerprint(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(conn, "source", tmp_path / "source.mp3", title="Alpha", artist="A")
+        _insert_track(conn, "feature-near", tmp_path / "near.mp3", title="Beta", artist="B")
+        _insert_track(conn, "feature-far", tmp_path / "far.mp3", title="Gamma", artist="C")
+        _insert_audio_features(conn, "source", bpm=120.0, energy=0.8, danceability=0.7)
+        _insert_audio_features(conn, "feature-near", bpm=121.0, energy=0.78, danceability=0.72)
+        _insert_audio_features(conn, "feature-far", bpm=80.0, energy=0.1, danceability=0.2)
+
+        reports = find_track_matches(conn, "source", limit=5)
+        by_id = {report.track_b.track_id: report for report in reports}
+
+        assert by_id["feature-near"].candidate_kind == "feature_similar"
+        assert by_id["feature-near"].candidate_strength == "weak"
+        assert by_id["feature-near"].candidate_scores["feature_similarity"] > 0.9
+        assert (
+            by_id["feature-near"].candidate_scores["feature_similarity"]
+            > by_id["feature-far"].candidate_scores["feature_similarity"]
+        )
+    finally:
+        conn.close()
+
+
+def test_find_track_matches_prioritizes_soundwave_before_name(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        source_fp = _encoded_fingerprint([index for index in range(360)])
+        similar_fp = _encoded_fingerprint([index for index in range(20, 320)])
+        different_fp = _encoded_fingerprint([index + 10_000 for index in range(360)])
+        _insert_track(
+            conn,
+            "source",
+            tmp_path / "source.mp3",
+            title="Shared Song",
+            artist="Artist",
+            chromaprint=source_fp,
+            duration_sec=180.0,
+        )
+        _insert_track(
+            conn,
+            "same-name-similar-fp",
+            tmp_path / "same-name-similar.mp3",
+            title="Shared Song",
+            artist="Artist",
+            chromaprint=similar_fp,
+            duration_sec=180.5,
+        )
+        _insert_track(
+            conn,
+            "same-name-different-fp",
+            tmp_path / "same-name-different.mp3",
+            title="Shared Song",
+            artist="Artist",
+            chromaprint=different_fp,
+            duration_sec=180.5,
+        )
+        _insert_track(
+            conn,
+            "different-name-exact-fp",
+            tmp_path / "different-name-exact.mp3",
+            title="Different Song",
+            artist="Artist",
+            chromaprint=source_fp,
+            duration_sec=180.5,
+        )
+
+        reports = find_track_matches(conn, "source", limit=5)
+
+        assert reports[0].track_b.track_id == "different-name-exact-fp"
+        assert reports[0].decision == "same_recording"
+        assert reports[1].track_b.track_id == "same-name-similar-fp"
+        assert reports[1].candidate_kind == "possible_recording_match"
+        assert reports[1].candidate_scores["fingerprint_similarity"] > 0.0
+        assert (
+            reports[1].candidate_scores["fingerprint_similarity"]
+            > reports[2].candidate_scores["fingerprint_similarity"]
+        )
     finally:
         conn.close()
 
@@ -473,6 +772,29 @@ def test_compare_tracks_and_match_track_cli_json(tmp_path):
     assert match_payload["against_library"] is True
     assert match_payload["count"] == 1
     assert match_payload["reports"][0]["track_b"]["track_id"] == "track-b"
+
+
+def _encoded_fingerprint(frames: list[int]) -> str:
+    payload = array.array("I", frames)
+    return chromaprint.encode_fingerprint(payload, 1).decode("ascii")
+
+
+def _insert_audio_features(
+    conn,
+    track_id: str,
+    *,
+    bpm: float | None = None,
+    energy: float | None = None,
+    danceability: float | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO audio_features (track_id, bpm, energy, danceability, updated_at)
+        VALUES (?, ?, ?, ?, '2026-01-01T00:00:00+00:00')
+        """,
+        (track_id, bpm, energy, danceability),
+    )
+    conn.commit()
 
 
 def _insert_audio_embedding(
