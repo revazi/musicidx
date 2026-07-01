@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { LibraryBrowsePanel } from "./components/LibraryBrowsePanel";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
@@ -39,6 +40,21 @@ import { Label } from "./components/ui/label";
 import { Progress } from "./components/ui/progress";
 import { Separator } from "./components/ui/separator";
 import { cn } from "./lib/utils";
+import type {
+  BrowsePayload,
+  MatchEvidenceItem,
+  MatchReport,
+  MatchTrackPayload,
+  SearchFeatureRange,
+  SearchIntentSummary,
+  SearchLlmHints,
+  SearchNotice,
+  SearchPayload,
+  SearchResult,
+  SearchSortSpec,
+  SearchSuggestion,
+  SearchTypeExample,
+} from "./types";
 
 type MusicidxOutput = {
   status: number;
@@ -68,124 +84,6 @@ type DesktopState = {
   prefix_args: string;
   models_path?: string;
   semantic_model?: string;
-};
-
-type SearchResult = {
-  track_id: string;
-  path: string;
-  title?: string | null;
-  artist?: string | null;
-  album?: string | null;
-  genre?: string | null;
-  score?: number;
-  raw_score?: number;
-  confidence?: "high" | "medium" | "low" | string | null;
-  warnings?: string[];
-  rank_reason?: {
-    mode?: string;
-    primary?: string;
-    summary?: string;
-    signals?: string[];
-    components?: Array<{ name?: string; label?: string; score?: number }>;
-    sort?: { field?: string; label?: string; direction?: string; source?: string; value?: number | null };
-  } | null;
-  candidate_evidence?: {
-    retrieved_by?: string[];
-    sources?: Array<{
-      source?: string;
-      role?: string;
-      score?: number;
-      matched?: boolean;
-      details?: Record<string, unknown>;
-    }>;
-    identity?: Record<string, boolean>;
-    semantic_only?: boolean;
-  } | null;
-  why?: string[];
-  scores?: Record<string, number>;
-  matched_tags?: Array<{ tag: string; score: number; source: string }>;
-  saved_feedback_rating?: "good" | "bad" | "neutral" | null;
-};
-
-type SearchFeatureRange = {
-  low?: number;
-  high?: number;
-  source?: string;
-};
-
-type SearchSortSpec = {
-  field?: string;
-  direction?: string;
-  source?: string;
-};
-
-type SearchSuggestion = {
-  query: string;
-  confidence?: number;
-  reason?: string;
-  kind?: "correction" | "example" | string;
-};
-
-type SearchNotice = {
-  level?: "info" | "warning" | "error" | string;
-  message?: string;
-};
-
-type SearchLlmHints = {
-  contexts?: string[];
-  prefer_tag_concepts?: string[];
-  avoid_tag_concepts?: string[];
-  feature_preferences?: Record<string, string>;
-  sort_by?: SearchSortSpec[];
-  limit?: number | null;
-  notes?: string | null;
-};
-
-type SearchIntentSummary = {
-  limit?: number;
-  contexts?: string[];
-  prefer_tags?: string[];
-  avoid_tags?: string[];
-  feature_ranges?: Record<string, SearchFeatureRange>;
-  sort_by?: SearchSortSpec[];
-  semantic_model?: string | null;
-  use_semantic?: boolean;
-};
-
-type SearchPayload = {
-  query?: string;
-  parser?: string;
-  llm_error?: string | null;
-  llm_hints?: SearchLlmHints | null;
-  intent?: SearchIntentSummary;
-  diagnostics?: Record<string, unknown>;
-  results?: SearchResult[];
-};
-
-type MatchTrackInfo = {
-  track_id?: string;
-  title?: string | null;
-  artist?: string | null;
-  album?: string | null;
-  path?: string;
-};
-
-type MatchReport = {
-  decision?: string;
-  identity_decision?: string;
-  confidence?: string;
-  confidence_score?: number;
-  reasons?: string[];
-  warnings?: string[];
-  track_a?: MatchTrackInfo;
-  track_b?: MatchTrackInfo;
-};
-
-type MatchTrackPayload = {
-  track_id?: string;
-  against_library?: boolean;
-  count?: number;
-  reports?: MatchReport[];
 };
 
 type HealthWarning = {
@@ -252,6 +150,7 @@ type SettingsState = {
   backgroundIndexingEnabled: boolean;
   backgroundIndexIntervalMinutes: number;
   backgroundIndexResourceProfile: string;
+  debugMode: boolean;
 };
 
 type IndexStep = {
@@ -318,6 +217,7 @@ const defaultSettings: SettingsState = {
   backgroundIndexingEnabled: true,
   backgroundIndexIntervalMinutes: DEFAULT_BACKGROUND_INDEX_INTERVAL_MINUTES,
   backgroundIndexResourceProfile: "balanced",
+  debugMode: false,
 };
 
 export default function App() {
@@ -335,7 +235,13 @@ export default function App() {
   const [rawOutput, setRawOutput] = useState("Ready.");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [lastSearchPayload, setLastSearchPayload] = useState<SearchPayload | null>(null);
-  const [matchPayload, setMatchPayload] = useState<MatchTrackPayload | null>(null);
+  const [browsePayload, setBrowsePayload] = useState<BrowsePayload | null>(null);
+  const [browseExpanded, setBrowseExpanded] = useState(false);
+  const [browseQuery, setBrowseQuery] = useState("");
+  const [browseSort, setBrowseSort] = useState("artist");
+  const [browseSortDirection, setBrowseSortDirection] = useState<"asc" | "desc">("asc");
+  const [matchPayloads, setMatchPayloads] = useState<Record<string, MatchTrackPayload>>({});
+  const [matchingTrackId, setMatchingTrackId] = useState<string | null>(null);
   const [playerTrack, setPlayerTrack] = useState<SearchResult | null>(null);
   const [playerSrc, setPlayerSrc] = useState("");
   const [playerError, setPlayerError] = useState("");
@@ -359,83 +265,13 @@ export default function App() {
   const pipelineRunningRef = useRef(false);
 
   const indexSteps = useMemo<IndexStep[]>(
-    () => [
-      {
-        id: "scan",
-        label: "Scan files",
-        args: () => ["scan", required(settings.musicFolder, "Music folder"), "--json"],
-      },
-      {
-        id: "metadata",
-        label: "Read metadata",
-        args: () => ["metadata", "--missing-only", "--json"],
-      },
-      {
-        id: "repair-metadata",
-        label: "Repair metadata",
-        args: () => [
-          "repair-metadata",
-          "--from-filename",
-          "--from-duplicates",
-          "--missing-only",
-          "--json",
-        ],
-      },
-      {
-        id: "fingerprint",
-        label: "Fingerprint",
-        args: () => ["fingerprint", "--missing-only", "--json"],
-      },
-      {
-        id: "basic",
-        label: "Audio features",
-        args: () => basicAnalysisArgs(settings.indexAnalysisMode, settings.indexResourceProfile),
-      },
-      {
-        id: "tags",
-        label: "ML tags",
-        args: () => [
-          "analyze-tags",
-          "--missing-only",
-          "--workers",
-          "auto",
-          "--resource-profile",
-          settings.indexResourceProfile,
-          "--subprocess-batches",
-          "--batch-size",
-          "auto",
-          "--json",
-        ],
-      },
-      {
-        id: "derived",
-        label: "Derived tags + context fit",
-        args: () => ["rebuild-derived", "--json"],
-      },
-      {
-        id: "profiles",
-        label: "Rebuild profiles",
-        args: () => ["rebuild-profiles", "--json"],
-      },
-      {
-        id: "embed",
-        label: "Profile embeddings",
-        args: () => {
-          const args = [
-            "embed",
-            "--batch-size",
-            "auto",
-            "--resource-profile",
-            settings.indexResourceProfile,
-            "--json",
-          ];
-          if (settings.semanticModel.trim()) {
-            args.splice(1, 0, "--model", settings.semanticModel.trim());
-          }
-          return args;
-        },
-      },
-    ],
+    () =>
+      buildIndexSteps({
+        musicFolder: settings.musicFolder,
+        analysisMode: settings.indexAnalysisMode,
+        resourceProfile: settings.indexResourceProfile,
+        semanticModel: settings.semanticModel,
+      }),
     [
       settings.indexAnalysisMode,
       settings.indexResourceProfile,
@@ -445,93 +281,13 @@ export default function App() {
   );
 
   const backgroundIndexSteps = useMemo<IndexStep[]>(
-    () => [
-      {
-        id: "scan",
-        label: "Scan files",
-        args: () => ["scan", required(settings.musicFolder, "Music folder"), "--json"],
-      },
-      {
-        id: "metadata",
-        label: "Read metadata",
-        args: () => ["metadata", "--missing-only", "--json"],
-      },
-      {
-        id: "repair-metadata",
-        label: "Repair metadata",
-        args: () => [
-          "repair-metadata",
-          "--from-filename",
-          "--from-duplicates",
-          "--missing-only",
-          "--json",
-        ],
-      },
-      {
-        id: "fingerprint",
-        label: "Fingerprint",
-        args: () => ["fingerprint", "--missing-only", "--json"],
-      },
-      {
-        id: "basic",
-        label: "Audio features",
-        args: () => [
-          "analyze-basic",
-          "--chunked",
-          "--chunk-sec",
-          "auto",
-          "--workers",
-          "auto",
-          "--resource-profile",
-          settings.backgroundIndexResourceProfile,
-          "--json",
-        ],
-      },
-      {
-        id: "tags",
-        label: "ML tags",
-        args: () => [
-          "analyze-tags",
-          "--missing-only",
-          "--workers",
-          "auto",
-          "--resource-profile",
-          settings.backgroundIndexResourceProfile,
-          "--subprocess-batches",
-          "--batch-size",
-          "auto",
-          "--json",
-        ],
-      },
-      {
-        id: "derived",
-        label: "Derived tags + context fit",
-        args: () => ["rebuild-derived", "--json"],
-      },
-      {
-        id: "profiles",
-        label: "Rebuild profiles",
-        args: () => ["rebuild-profiles", "--json"],
-      },
-      {
-        id: "embed",
-        label: "Profile embeddings",
-        args: () => {
-          const args = [
-            "embed",
-            "--batch-size",
-            "auto",
-            "--resource-profile",
-            settings.backgroundIndexResourceProfile,
-            "--json",
-          ];
-          if (settings.semanticModel.trim()) {
-            args.splice(1, 0, "--model", settings.semanticModel.trim());
-          }
-          return args;
-        },
-      },
-    ],
+    () =>
+      buildIndexSteps({
+        musicFolder: settings.musicFolder,
+        analysisMode: "quality",
+        resourceProfile: settings.backgroundIndexResourceProfile,
+        semanticModel: settings.semanticModel,
+      }),
     [settings.backgroundIndexResourceProfile, settings.musicFolder, settings.semanticModel],
   );
 
@@ -543,6 +299,14 @@ export default function App() {
   const backgroundIndexIntervalMs = backgroundIndexIntervalMinutes * 60 * 1000;
   const backgroundIndexIntervalLabel = formatMinutes(backgroundIndexIntervalMinutes);
   const settingsPathWarnings = settingsHealthWarnings(settings);
+  const working = busy || pipelineRunning || indexHealthLoading;
+  const workingLabel = pipelineRunning
+    ? `${pipelineMode === "background" ? "Background indexing" : "Indexing"}: ${pipelineStep}`
+    : indexHealthLoading
+      ? "Checking index health"
+      : busy
+        ? status
+        : "";
 
   useEffect(() => {
     void initializeDesktopState();
@@ -743,7 +507,7 @@ export default function App() {
     setPipelineCompleted(0);
     setPipelineSummaries([]);
     setResults([]);
-    setMatchPayload(null);
+    setMatchPayloads({});
     try {
       for (const [index, step] of indexSteps.entries()) {
         setPipelineStep(step.label);
@@ -819,7 +583,7 @@ export default function App() {
     const payload = await runJsonCommand<SearchPayload>(args);
     setResults(payload.results ?? []);
     setLastSearchPayload(payload);
-    setMatchPayload(null);
+    setMatchPayloads({});
     writeRaw({
       summary: {
         query: payload.query,
@@ -830,6 +594,49 @@ export default function App() {
       },
       results: payload.results ?? [],
     });
+  }
+
+  async function loadBrowse(
+    path?: string | null,
+    options: { query?: string; sort?: string; direction?: "asc" | "desc"; offset?: number } = {},
+  ) {
+    persistSettings(settings);
+    const nextQuery = options.query ?? browseQuery;
+    const nextSort = options.sort ?? browseSort;
+    const nextDirection = options.direction ?? browseSortDirection;
+    const nextOffset = Math.max(0, options.offset ?? 0);
+    const args = [
+      "browse",
+      "--json",
+      "--limit",
+      "50",
+      "--offset",
+      String(nextOffset),
+      "--sort",
+      nextSort,
+    ];
+    if (nextDirection === "desc") {
+      args.push("--desc");
+    }
+    if (nextQuery.trim()) {
+      args.push("--query", nextQuery.trim());
+    }
+    if (path) {
+      args.push("--path", path);
+    } else if (settings.musicFolder.trim()) {
+      args.push("--path", settings.musicFolder.trim());
+    }
+    const payload = await runJsonCommand<BrowsePayload>(args);
+    setBrowsePayload(payload);
+    setBrowseExpanded(true);
+    updateStatus(
+      payload.cwd
+        ? payload.mode === "search"
+          ? "Library search loaded"
+          : "Library browser loaded"
+        : "No indexed library roots found",
+      false,
+    );
   }
 
   async function parseIntent() {
@@ -940,6 +747,14 @@ export default function App() {
   }
 
   async function findMatches(result: SearchResult) {
+    if (matchPayloads[result.track_id]) {
+      setMatchPayloads((current) => {
+        const next = { ...current };
+        delete next[result.track_id];
+        return next;
+      });
+      return;
+    }
     const args = [
       "match-track",
       "--track-id",
@@ -949,13 +764,18 @@ export default function App() {
       "5",
       "--json",
     ];
-    const payload = await runJsonCommand<MatchTrackPayload>(args);
-    setMatchPayload(payload);
-    updateStatus(
-      payload.count
-        ? `Found ${payload.count} match candidate${payload.count === 1 ? "" : "s"}`
-        : "No deterministic match candidates found",
-    );
+    setMatchingTrackId(result.track_id);
+    try {
+      const payload = await runJsonCommand<MatchTrackPayload>(args);
+      setMatchPayloads((current) => ({ ...current, [result.track_id]: payload }));
+      updateStatus(
+        payload.count
+          ? `Found ${payload.count} closest candidate${payload.count === 1 ? "" : "s"}`
+          : "No nearby candidates found",
+      );
+    } finally {
+      setMatchingTrackId(null);
+    }
   }
 
   async function revealTrack(result: SearchResult) {
@@ -1013,13 +833,13 @@ export default function App() {
   }
 
   async function cancelCurrentCommand() {
+    cancelRequestedRef.current = true;
+    setCanceling(true);
+    updateStatus("Cancelling…");
     const requestId = currentRequestIdRef.current;
     if (!requestId) {
       return;
     }
-    cancelRequestedRef.current = true;
-    setCanceling(true);
-    updateStatus("Cancelling…");
     try {
       await invoke<boolean>("cancel_musicidx", { requestId });
     } catch (error) {
@@ -1158,6 +978,10 @@ export default function App() {
       <Shell
         status={status}
         statusError={statusError}
+        working={working}
+        workingLabel={workingLabel}
+        canceling={canceling}
+        onCancel={cancelCurrentCommand}
         onDoctor={() => runJsonCommand(["doctor", "--json"])}
         onSettings={() => setView("settings")}
       >
@@ -1355,6 +1179,20 @@ export default function App() {
                   <option value="light">Light</option>
                 </select>
               </Field>
+              <label className="flex items-start gap-2 rounded-lg border bg-muted/50 p-3 text-sm">
+                <input
+                  className="mt-1"
+                  type="checkbox"
+                  checked={settings.debugMode}
+                  onChange={(event) => updateSettings({ debugMode: event.target.checked })}
+                />
+                <span className="grid gap-1">
+                  <span className="font-medium">Debug mode</span>
+                  <span className="text-muted-foreground">
+                    Show raw output, search parameters, rank/evidence details, and full match evidence.
+                  </span>
+                </span>
+              </label>
               <Field label="Manual indexing type">
                 <select
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -1519,6 +1357,10 @@ export default function App() {
     <Shell
       status={status}
       statusError={statusError}
+      working={working}
+      workingLabel={workingLabel}
+      canceling={canceling}
+      onCancel={cancelCurrentCommand}
       onDoctor={() => runJsonCommand(["doctor", "--json"])}
       onSettings={() => setView("settings")}
     >
@@ -1533,12 +1375,13 @@ export default function App() {
                 placeholder="Search your library…"
                 onChange={(event) => setQuery(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") {
+                  if (event.key === "Enter" && !busy) {
                     void searchMusic();
                   }
                 }}
               />
               <Button className="rounded-full px-5" disabled={busy} onClick={() => void searchMusic()}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 Search
               </Button>
             </div>
@@ -1565,14 +1408,61 @@ export default function App() {
                 </label>
               </div>
               <Button variant="ghost" size="sm" disabled={busy} onClick={parseIntent}>
-                <Sparkles className="h-4 w-4" />
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 Parse intent
               </Button>
             </div>
             {lastSearchPayload ? (
-              <SearchParametersPanel payload={lastSearchPayload} onSearchSuggestion={searchMusic} />
+              <SearchParametersPanel
+                payload={lastSearchPayload}
+                debugMode={settings.debugMode}
+                onSearchSuggestion={searchMusic}
+              />
             ) : null}
-            {matchPayload ? <MatchSummaryPanel payload={matchPayload} /> : null}
+            <LibraryBrowsePanel
+              payload={browsePayload}
+              expanded={browseExpanded}
+              busy={busy}
+              matchPayloads={matchPayloads}
+              matchingTrackId={matchingTrackId}
+              debugMode={settings.debugMode}
+              query={browseQuery}
+              sort={browseSort}
+              sortDirection={browseSortDirection}
+              onQueryChange={setBrowseQuery}
+              onSortChange={setBrowseSort}
+              onSortDirectionChange={setBrowseSortDirection}
+              onToggle={() => setBrowseExpanded((value) => !value)}
+              onLoad={() => void loadBrowse(browsePayload?.cwd ?? (settings.musicFolder || null), { offset: 0 })}
+              onOpenPath={(path) => void loadBrowse(path, { offset: 0 })}
+              onSubmitSearch={() => void loadBrowse(browsePayload?.cwd ?? (settings.musicFolder || null), { offset: 0 })}
+              onClearSearch={() => {
+                setBrowseQuery("");
+                void loadBrowse(browsePayload?.cwd ?? (settings.musicFolder || null), { query: "", offset: 0 });
+              }}
+              onPage={(offset) => void loadBrowse(browsePayload?.cwd ?? (settings.musicFolder || null), { offset })}
+              onPlay={(track) => void playTrack(track)}
+              onReveal={(track) => void revealTrack(track)}
+              onMatch={(track) => void findMatches(track)}
+              renderMatches={(payload) => (
+                <MatchSummaryPanel
+                  payload={payload}
+                  debugMode={settings.debugMode}
+                  onPlayCandidate={(report) => {
+                    const candidate = searchResultFromMatchReport(report);
+                    if (candidate) {
+                      void playTrack(candidate);
+                    }
+                  }}
+                  onRevealCandidate={(report) => {
+                    const candidate = searchResultFromMatchReport(report);
+                    if (candidate) {
+                      void revealTrack(candidate);
+                    }
+                  }}
+                />
+              )}
+            />
             <div className="rounded-lg border bg-muted/50 px-3 py-2 text-xs text-muted-foreground wrap-anywhere">
               {backgroundStatus}
             </div>
@@ -1605,6 +1495,9 @@ export default function App() {
                   onPlay={playTrack}
                   onReveal={revealTrack}
                   onMatch={findMatches}
+                  matchPayload={matchPayloads[result.track_id] ?? null}
+                  matchLoading={matchingTrackId === result.track_id}
+                  debugMode={settings.debugMode}
                   playingTrackId={playerTrack?.track_id ?? null}
                 />
               ))}
@@ -1613,19 +1506,21 @@ export default function App() {
         </CardContent>
       </Card>
 
-      <details className="rounded-xl border bg-card p-4 text-card-foreground shadow-sm" open>
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
-          <span>Live/raw output</span>
-          <span className="text-xs text-muted-foreground">expand/collapse command logs</span>
-        </summary>
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">Streaming stdout/stderr from the local CLI.</p>
-          <Button variant="outline" size="sm" onClick={() => setRawOutput("Ready.")}>Clear</Button>
-        </div>
-        <pre className="mt-3 max-h-96 max-w-full overflow-y-auto overflow-x-hidden whitespace-pre-wrap rounded-lg bg-zinc-950 p-4 text-xs text-zinc-100 wrap-anywhere">
-          {rawOutput}
-        </pre>
-      </details>
+      {settings.debugMode ? (
+        <details className="rounded-xl border bg-card p-4 text-card-foreground shadow-sm" open>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium">
+            <span>Live/raw output</span>
+            <span className="text-xs text-muted-foreground">expand/collapse command logs</span>
+          </summary>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">Streaming stdout/stderr from the local CLI.</p>
+            <Button variant="outline" size="sm" onClick={() => setRawOutput("Ready.")}>Clear</Button>
+          </div>
+          <pre className="mt-3 max-h-96 max-w-full overflow-y-auto overflow-x-hidden whitespace-pre-wrap rounded-lg bg-zinc-950 p-4 text-xs text-zinc-100 wrap-anywhere">
+            {rawOutput}
+          </pre>
+        </details>
+      ) : null}
 
       {playerTrack ? (
         <div className="fixed bottom-20 right-4 z-40 w-[min(calc(100vw-2rem),28rem)] rounded-xl border bg-card/90 p-4 shadow-xl backdrop-blur-md">
@@ -1770,12 +1665,20 @@ function Shell({
   children,
   status,
   statusError,
+  working,
+  workingLabel,
+  canceling,
+  onCancel,
   onDoctor,
   onSettings,
 }: {
   children: React.ReactNode;
   status: string;
   statusError: boolean;
+  working: boolean;
+  workingLabel: string;
+  canceling: boolean;
+  onCancel: () => void;
   onDoctor: () => void;
   onSettings: () => void;
 }) {
@@ -1796,8 +1699,8 @@ function Shell({
             <Badge variant={statusError ? "destructive" : "secondary"} className="max-w-full wrap-anywhere">
               {status}
             </Badge>
-            <Button variant="outline" onClick={onDoctor}>
-              <Activity className="h-4 w-4" />
+            <Button variant="outline" disabled={working} onClick={onDoctor}>
+              {working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
               Doctor
             </Button>
             <Button variant="outline" size="icon" onClick={onSettings} aria-label="Settings">
@@ -1805,168 +1708,340 @@ function Shell({
             </Button>
           </div>
         </header>
+        {working ? (
+          <div className="sticky top-3 z-50 rounded-xl border bg-card/95 p-3 shadow-lg backdrop-blur-md">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-center gap-2 text-sm">
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+                <span className="font-medium text-foreground">Working</span>
+                <span className="wrap-anywhere text-muted-foreground">{workingLabel || status}</span>
+              </div>
+              <Button size="sm" variant="outline" disabled={canceling} onClick={onCancel}>
+                {canceling ? "Cancelling…" : "Cancel"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {children}
       </div>
     </div>
   );
 }
 
+type EvidenceCountStages = ReadonlyArray<readonly [string, Record<string, unknown>]>;
+
 function SearchParametersPanel({
   payload,
+  debugMode,
   onSearchSuggestion,
 }: {
   payload: SearchPayload;
+  debugMode: boolean;
   onSearchSuggestion: (query: string) => Promise<void>;
 }) {
   const intent = payload.intent ?? {};
   const diagnostics = payload.diagnostics ?? {};
-  const featureEntries = Object.entries(intent.feature_ranges ?? {});
-  const sortSpecs = intent.sort_by ?? [];
-  const weights = recordValue(diagnostics.weights);
-  const scoreWarnings = stringList(diagnostics.score_warnings);
-  const evidenceCountStages = [
-    ["scored", recordValue(diagnostics.scored_evidence_source_counts)],
-    ["filtered", recordValue(diagnostics.filtered_evidence_source_counts)],
-    ["limited", recordValue(diagnostics.limited_evidence_source_counts)],
-  ] as const;
+  const evidenceCountStages = searchEvidenceCountStages(diagnostics);
   const suggestions = searchSuggestionsFromDiagnostics(diagnostics);
-  const hasCorrectionSuggestion = suggestions.some((suggestion) => suggestion.kind === "correction");
+  const visibleSuggestions = debugMode ? suggestions : compactSearchSuggestions(suggestions);
+  const examples = searchTypeExamplesFromDiagnostics(diagnostics);
+  const visibleExamples = debugMode ? examples : compactSearchTypeExamples(examples);
   const notice = searchNoticeFromDiagnostics(diagnostics);
-  const llmUsed = Boolean(payload.parser && payload.parser !== "dynamic");
-  const llmHints = payload.llm_hints;
+  const noticeText = notice ? searchNoticeDisplayText(notice, debugMode) : "";
+
+  if (!debugMode && !noticeText && !visibleSuggestions.length && !visibleExamples.length) {
+    return null;
+  }
+
   return (
     <div className="grid gap-3 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-medium text-foreground">Search parameters used</span>
-        <Badge variant="secondary">parser: {payload.parser || "dynamic"}</Badge>
-        <Badge variant={payload.llm_error ? "destructive" : "secondary"}>
-          {payload.llm_error ? "LLM fallback" : llmUsed ? "LLM hints" : "local parser"}
-        </Badge>
-        <Badge variant="secondary">limit: {intent.limit ?? "auto"}</Badge>
-        <Badge variant="secondary">
-          {intent.use_semantic ? "semantic search on" : "semantic search off"}
-        </Badge>
-        <Badge variant="outline">raw calibrated scores</Badge>
-      </div>
-
-      {payload.llm_error ? (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-destructive">
-          LLM failed; search used local dynamic intent. {payload.llm_error.split("\n")[0]}
-        </div>
-      ) : null}
-      {notice?.message ? (
-        <div
-          className={cn(
-            "rounded-md border p-2",
-            notice.level === "warning"
-              ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
-              : "bg-background/50",
-          )}
-        >
-          {notice.message}
-        </div>
-      ) : null}
-      {suggestions.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background/50 p-2">
-          <span className="font-medium text-foreground">
-            {hasCorrectionSuggestion ? "Did you mean / try:" : "Try:"}
-          </span>
-          {suggestions.map((suggestion) => (
-            <Button
-              key={`${suggestion.kind || "suggestion"}:${suggestion.query}`}
-              size="sm"
-              variant={suggestion.kind === "correction" ? "default" : "outline"}
-              title={suggestion.reason}
-              onClick={() => void onSearchSuggestion(suggestion.query)}
-            >
-              {suggestion.query}
-              {typeof suggestion.confidence === "number" ? ` ${(suggestion.confidence * 100).toFixed(0)}%` : ""}
-            </Button>
-          ))}
-        </div>
-      ) : null}
-
-      {llmHints ? (
-        <details className="rounded-md border bg-background/50 p-2">
-          <summary className="cursor-pointer font-medium text-foreground">
-            LLM-provided hints before local validation/merge
-          </summary>
-          <div className="mt-2 grid gap-2 md:grid-cols-2">
-            <SearchParamBlock label="LLM contexts" value={chipList(llmHints.contexts)} />
-            <SearchParamBlock
-              label="LLM prefer concepts"
-              value={chipList(llmHints.prefer_tag_concepts, 12)}
-            />
-            <SearchParamBlock
-              label="LLM avoid concepts"
-              value={chipList(llmHints.avoid_tag_concepts, 12)}
-            />
-            <SearchParamBlock
-              label="LLM features"
-              value={formatFeaturePreferences(llmHints.feature_preferences)}
-            />
-            <SearchParamBlock
-              label="LLM sort"
-              value={llmHints.sort_by?.length ? llmHints.sort_by.map(formatSortSpec).join(" · ") : "none"}
-            />
-            <SearchParamBlock label="LLM notes" value={llmHints.notes || "none"} />
-          </div>
-        </details>
-      ) : null}
-
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-        <SearchParamBlock label="Query" value={payload.query || "—"} />
-        <SearchParamBlock label="Semantic model" value={intent.semantic_model || "not indexed/disabled"} />
-        <SearchParamBlock label="Contexts" value={chipList(intent.contexts)} />
-        <SearchParamBlock label="Prefer tags" value={chipList(intent.prefer_tags, 12)} />
-        <SearchParamBlock label="Avoid tags" value={chipList(intent.avoid_tags, 10)} />
-        <SearchParamBlock
-          label="Feature ranges"
-          value={featureEntries.length ? featureEntries.map(formatFeatureRange).join(" · ") : "none"}
-        />
-        <SearchParamBlock
-          label="Sort"
-          value={sortSpecs.length ? sortSpecs.map(formatSortSpec).join(" · ") : "none"}
-        />
-        <SearchParamBlock
-          label="Score calibration"
-          value={String(diagnostics.score_calibration || diagnostics.score_normalization || "raw")}
-        />
-        <SearchParamBlock
-          label="Diagnostics"
-          value={[
-            metricText("top", diagnostics.top_raw_score),
-            metricText("filtered", diagnostics.filtered_candidate_count),
-            metricText("deduped", diagnostics.duplicate_suppressed_count),
-            scoreWarnings.length ? `warnings ${scoreWarnings.join(", ")}` : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        />
-        <SearchParamBlock
-          label="Evidence counts"
-          value={formatEvidenceCountStages(evidenceCountStages)}
-        />
-      </div>
-
-      {evidenceCountStages.some(([, counts]) => Object.keys(counts).length > 0) ? (
-        <details className="rounded-md border bg-background/50 p-2">
-          <summary className="cursor-pointer font-medium text-foreground">Evidence source counts</summary>
-          <div className="mt-2 grid gap-2 md:grid-cols-3">
-            {evidenceCountStages.map(([stage, counts]) => (
-              <SearchParamBlock key={stage} label={stage} value={formatRecordCounts(counts)} />
-            ))}
-          </div>
-        </details>
-      ) : null}
-
-      {Object.keys(weights).length > 0 ? (
-        <details className="rounded-md border bg-background/50 p-2">
-          <summary className="cursor-pointer font-medium text-foreground">Ranking weights</summary>
-          <p className="mt-2 wrap-anywhere">{formatWeights(weights)}</p>
-        </details>
-      ) : null}
+      <SearchDebugBadges payload={payload} intent={intent} debugMode={debugMode} />
+      <SearchLlmFallback payload={payload} debugMode={debugMode} />
+      <SearchNoticeMessage notice={notice} noticeText={noticeText} />
+      <SearchSuggestionButtons suggestions={visibleSuggestions} onSearchSuggestion={onSearchSuggestion} />
+      <SearchTypeExamplesPanel examples={visibleExamples} onSearchSuggestion={onSearchSuggestion} />
+      <SearchLlmHintsPanel hints={payload.llm_hints} debugMode={debugMode} />
+      <SearchDebugIntentGrid
+        payload={payload}
+        intent={intent}
+        diagnostics={diagnostics}
+        evidenceCountStages={evidenceCountStages}
+        debugMode={debugMode}
+      />
+      <SearchEvidenceCountsPanel evidenceCountStages={evidenceCountStages} debugMode={debugMode} />
+      <SearchRankingWeightsPanel weights={recordValue(diagnostics.weights)} debugMode={debugMode} />
     </div>
+  );
+}
+
+function SearchDebugBadges({
+  payload,
+  intent,
+  debugMode,
+}: {
+  payload: SearchPayload;
+  intent: SearchIntentSummary;
+  debugMode: boolean;
+}) {
+  if (!debugMode) {
+    return null;
+  }
+  const llmUsed = Boolean(payload.parser && payload.parser !== "dynamic");
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="font-medium text-foreground">Search parameters used</span>
+      <Badge variant="secondary">parser: {payload.parser || "dynamic"}</Badge>
+      <Badge variant={payload.llm_error ? "outline" : "secondary"}>
+        {payload.llm_error ? "local parser fallback" : llmUsed ? "LLM hints" : "local parser"}
+      </Badge>
+      <Badge variant="secondary">limit: {intent.limit ?? "auto"}</Badge>
+      <Badge variant="secondary">
+        {intent.use_semantic ? "semantic search on" : "semantic search off"}
+      </Badge>
+      <Badge variant="outline">raw calibrated scores</Badge>
+    </div>
+  );
+}
+
+function SearchLlmFallback({ payload, debugMode }: { payload: SearchPayload; debugMode: boolean }) {
+  if (!debugMode || !payload.llm_error) {
+    return null;
+  }
+  return (
+    <div className="rounded-md border bg-background/50 p-2 text-muted-foreground">
+      LLM hints unavailable or rejected; local parser used. {payload.llm_error.split("\n")[0]}
+    </div>
+  );
+}
+
+function SearchNoticeMessage({
+  notice,
+  noticeText,
+}: {
+  notice: SearchNotice | null;
+  noticeText: string;
+}) {
+  if (!noticeText) {
+    return null;
+  }
+  return (
+    <div
+      className={cn(
+        "rounded-md border p-2",
+        notice?.level === "warning"
+          ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+          : "bg-background/50",
+      )}
+    >
+      <span className="font-medium text-foreground">
+        {notice?.level === "warning" ? "Search note" : "Search tip"}: 
+      </span>
+      {noticeText}
+    </div>
+  );
+}
+
+function SearchSuggestionButtons({
+  suggestions,
+  onSearchSuggestion,
+}: {
+  suggestions: SearchSuggestion[];
+  onSearchSuggestion: (query: string) => Promise<void>;
+}) {
+  if (!suggestions.length) {
+    return null;
+  }
+  const hasCorrectionSuggestion = suggestions.some((suggestion) => suggestion.kind === "correction");
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border bg-background/50 p-2">
+      <span className="font-medium text-foreground">
+        {hasCorrectionSuggestion ? "Did you mean / try:" : "Try:"}
+      </span>
+      {suggestions.map((suggestion) => (
+        <Button
+          key={`${suggestion.kind || "suggestion"}:${suggestion.query}`}
+          size="sm"
+          variant={suggestion.kind === "correction" ? "default" : "outline"}
+          title={suggestion.reason}
+          onClick={() => void onSearchSuggestion(suggestion.query)}
+        >
+          {suggestion.label ? `${suggestion.label}: ` : ""}{suggestion.query}
+          {typeof suggestion.confidence === "number" ? ` ${(suggestion.confidence * 100).toFixed(0)}%` : ""}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function SearchTypeExamplesPanel({
+  examples,
+  onSearchSuggestion,
+}: {
+  examples: SearchTypeExample[];
+  onSearchSuggestion: (query: string) => Promise<void>;
+}) {
+  if (!examples.length) {
+    return null;
+  }
+  return (
+    <details className="rounded-md border bg-background/50 p-2">
+      <summary className="cursor-pointer font-medium text-foreground">Search types / examples</summary>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {examples.map((example, index) => (
+          <SearchTypeExampleItem
+            key={`${example.type || "type"}:${example.query || index}`}
+            example={example}
+            index={index}
+            onSearchSuggestion={onSearchSuggestion}
+          />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function SearchTypeExampleItem({
+  example,
+  index,
+  onSearchSuggestion,
+}: {
+  example: SearchTypeExample;
+  index: number;
+  onSearchSuggestion: (query: string) => Promise<void>;
+}) {
+  if (!example.query) {
+    return (
+      <span
+        key={`${example.type || "type"}:${index}`}
+        className="rounded-md border bg-muted/50 px-2 py-1"
+        title={example.reason}
+      >
+        {example.label || example.type || "Tip"}: {example.reason}
+      </span>
+    );
+  }
+  return (
+    <Button
+      key={`${example.type || "type"}:${example.query}`}
+      size="sm"
+      variant="outline"
+      title={example.reason}
+      onClick={() => void onSearchSuggestion(example.query || "")}
+    >
+      {example.label || example.type || "Example"}: {example.query}
+    </Button>
+  );
+}
+
+function SearchLlmHintsPanel({
+  hints,
+  debugMode,
+}: {
+  hints: SearchLlmHints | null | undefined;
+  debugMode: boolean;
+}) {
+  if (!debugMode || !hints) {
+    return null;
+  }
+  return (
+    <details className="rounded-md border bg-background/50 p-2">
+      <summary className="cursor-pointer font-medium text-foreground">
+        LLM-provided hints before local validation/merge
+      </summary>
+      <div className="mt-2 grid gap-2 md:grid-cols-2">
+        <SearchParamBlock label="LLM contexts" value={chipList(hints.contexts)} />
+        <SearchParamBlock label="LLM prefer concepts" value={chipList(hints.prefer_tag_concepts, 12)} />
+        <SearchParamBlock label="LLM avoid concepts" value={chipList(hints.avoid_tag_concepts, 12)} />
+        <SearchParamBlock label="LLM features" value={formatFeaturePreferences(hints.feature_preferences)} />
+        <SearchParamBlock
+          label="LLM sort"
+          value={hints.sort_by?.length ? hints.sort_by.map(formatSortSpec).join(" · ") : "none"}
+        />
+        <SearchParamBlock label="LLM notes" value={hints.notes || "none"} />
+      </div>
+    </details>
+  );
+}
+
+function SearchDebugIntentGrid({
+  payload,
+  intent,
+  diagnostics,
+  evidenceCountStages,
+  debugMode,
+}: {
+  payload: SearchPayload;
+  intent: SearchIntentSummary;
+  diagnostics: Record<string, unknown>;
+  evidenceCountStages: EvidenceCountStages;
+  debugMode: boolean;
+}) {
+  if (!debugMode) {
+    return null;
+  }
+  const featureEntries = Object.entries(intent.feature_ranges ?? {});
+  const sortSpecs = intent.sort_by ?? [];
+  const scoreWarnings = stringList(diagnostics.score_warnings);
+  return (
+    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+      <SearchParamBlock label="Query" value={payload.query || "—"} />
+      <SearchParamBlock label="Semantic model" value={intent.semantic_model || "not indexed/disabled"} />
+      <SearchParamBlock label="Contexts" value={chipList(intent.contexts)} />
+      <SearchParamBlock label="Prefer tags" value={chipList(intent.prefer_tags, 12)} />
+      <SearchParamBlock label="Avoid tags" value={chipList(intent.avoid_tags, 10)} />
+      <SearchParamBlock
+        label="Feature ranges"
+        value={featureEntries.length ? featureEntries.map(formatFeatureRange).join(" · ") : "none"}
+      />
+      <SearchParamBlock label="Sort" value={sortSpecs.length ? sortSpecs.map(formatSortSpec).join(" · ") : "none"} />
+      <SearchParamBlock
+        label="Score calibration"
+        value={String(diagnostics.score_calibration || diagnostics.score_normalization || "raw")}
+      />
+      <SearchParamBlock label="Diagnostics" value={formatSearchDiagnostics(diagnostics, scoreWarnings)} />
+      <SearchParamBlock label="Evidence counts" value={formatEvidenceCountStages(evidenceCountStages)} />
+    </div>
+  );
+}
+
+function SearchEvidenceCountsPanel({
+  evidenceCountStages,
+  debugMode,
+}: {
+  evidenceCountStages: EvidenceCountStages;
+  debugMode: boolean;
+}) {
+  const hasCounts = evidenceCountStages.some(([, counts]) => Object.keys(counts).length > 0);
+  if (!debugMode || !hasCounts) {
+    return null;
+  }
+  return (
+    <details className="rounded-md border bg-background/50 p-2">
+      <summary className="cursor-pointer font-medium text-foreground">Evidence source counts</summary>
+      <div className="mt-2 grid gap-2 md:grid-cols-3">
+        {evidenceCountStages.map(([stage, counts]) => (
+          <SearchParamBlock key={stage} label={stage} value={formatRecordCounts(counts)} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function SearchRankingWeightsPanel({
+  weights,
+  debugMode,
+}: {
+  weights: Record<string, unknown>;
+  debugMode: boolean;
+}) {
+  if (!debugMode || Object.keys(weights).length === 0) {
+    return null;
+  }
+  return (
+    <details className="rounded-md border bg-background/50 p-2">
+      <summary className="cursor-pointer font-medium text-foreground">Ranking weights</summary>
+      <p className="mt-2 wrap-anywhere">{formatWeights(weights)}</p>
+    </details>
   );
 }
 
@@ -1979,52 +2054,174 @@ function SearchParamBlock({ label, value }: { label: string; value: string }) {
   );
 }
 
-function MatchSummaryPanel({ payload }: { payload: MatchTrackPayload }) {
+function MatchSummaryPanel({
+  payload,
+  debugMode,
+  onPlayCandidate,
+  onRevealCandidate,
+}: {
+  payload: MatchTrackPayload;
+  debugMode: boolean;
+  onPlayCandidate: (report: MatchReport) => void;
+  onRevealCandidate: (report: MatchReport) => void;
+}) {
   const reports = payload.reports ?? [];
-  const source = reports[0]?.track_a;
   return (
     <div className="grid gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-medium text-foreground">Match report</span>
+        <span className="font-medium text-foreground">Closest tracks</span>
         <Badge variant="secondary">{payload.count ?? reports.length} candidates</Badge>
-        {source ? (
-          <span className="wrap-anywhere">
-            {source.artist ? `${source.artist} · ` : ""}{source.title || source.track_id}
-          </span>
-        ) : null}
+        <span>ranked by decoded fingerprint/soundwave → name → duration → metadata → features → audio embedding</span>
       </div>
       {reports.length ? (
         <div className="grid gap-2">
-          {reports.slice(0, 5).map((report, index) => (
-            <div key={`${report.track_b?.track_id || index}`} className="rounded-md border bg-background/50 p-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={report.identity_decision === "same" ? "secondary" : "outline"}>
-                  {report.decision || "unknown"}
-                </Badge>
-                <span className="font-medium text-foreground">
-                  {report.track_b?.artist ? `${report.track_b.artist} · ` : ""}
-                  {report.track_b?.title || report.track_b?.track_id || "candidate"}
-                </span>
-                <span>
-                  {report.confidence || "low"} {numericText(report.confidence_score)}
-                </span>
+          {reports.slice(0, 5).map((report, index) => {
+            const candidate = searchResultFromMatchReport(report);
+            return (
+              <div key={`${report.track_b?.track_id || index}`} className="rounded-md border bg-background/50 p-2">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="wrap-anywhere font-medium text-foreground">
+                      {report.track_b?.artist ? `${report.track_b.artist} · ` : ""}
+                      {report.track_b?.title || report.track_b?.track_id || "candidate"}
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      <span>closest {numericText(report.candidate_score)}</span>
+                      <span>identity {report.confidence || "low"} {numericText(report.confidence_score)}</span>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                    <Badge variant={matchStrengthVariant(report.candidate_strength)}>
+                      {report.candidate_strength || "weak"}
+                    </Badge>
+                    <Badge variant={report.identity_decision === "same" ? "secondary" : "outline"}>
+                      {report.decision || "unknown"}
+                    </Badge>
+                  </div>
+                </div>
+                {report.candidate_summary ? (
+                  <p className="mt-1 wrap-anywhere text-foreground">{report.candidate_summary}</p>
+                ) : null}
+                {debugMode && report.track_b?.path ? (
+                  <p className="mt-1 wrap-anywhere text-muted-foreground">{report.track_b.path}</p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" disabled={!candidate} onClick={() => onPlayCandidate(report)}>
+                    <Play className="h-3.5 w-3.5" />
+                    Play
+                  </Button>
+                  <Button size="sm" variant="outline" disabled={!candidate} onClick={() => onRevealCandidate(report)}>
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    Show
+                  </Button>
+                </div>
+                {debugMode && report.candidate_reasons?.length ? (
+                  <p className="mt-1 wrap-anywhere">Closest signals: {report.candidate_reasons.join("; ")}</p>
+                ) : null}
+                {debugMode ? (
+                  <details className="mt-2 rounded-md border bg-muted/30 p-2">
+                    <summary className="cursor-pointer font-medium text-foreground">Evidence details</summary>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {matchEvidenceChips(report.evidence).map((chip) => (
+                        <Badge key={chip} variant="outline">{chip}</Badge>
+                      ))}
+                    </div>
+                    <p className="mt-2 wrap-anywhere text-muted-foreground">
+                      {formatMatchEvidenceDetails(report.evidence)}
+                    </p>
+                  </details>
+                ) : null}
+                {debugMode && report.candidate_scores ? (
+                  <p className="mt-1 wrap-anywhere text-muted-foreground">
+                    Score breakdown: {formatMatchCandidateScores(report.candidate_scores)}
+                  </p>
+                ) : null}
+                {debugMode && report.reasons?.length ? (
+                  <p className="mt-1 wrap-anywhere">Identity: {report.reasons.join("; ")}</p>
+                ) : null}
+                {debugMode && report.warnings?.length ? (
+                  <p className="mt-1 wrap-anywhere text-yellow-700 dark:text-yellow-300">
+                    {report.warnings.join("; ")}
+                  </p>
+                ) : null}
               </div>
-              {report.reasons?.length ? (
-                <p className="mt-1 wrap-anywhere">{report.reasons.join("; ")}</p>
-              ) : null}
-              {report.warnings?.length ? (
-                <p className="mt-1 wrap-anywhere text-yellow-700 dark:text-yellow-300">
-                  {report.warnings.join("; ")}
-                </p>
-              ) : null}
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
-        <p>No deterministic match candidates found.</p>
+        <p>No nearby candidates found.</p>
       )}
     </div>
   );
+}
+
+function matchEvidenceChips(evidence: MatchEvidenceItem[] | undefined): string[] {
+  if (!evidence?.length) {
+    return ["no evidence details"];
+  }
+  return evidence
+    .filter((item) => item.status && item.status !== "missing")
+    .map((item) => `${(item.source || "source").replaceAll("_", " ")}: ${item.status} ${numericText(item.score)}`)
+    .slice(0, 8);
+}
+
+function formatMatchEvidenceDetails(evidence: MatchEvidenceItem[] | undefined): string {
+  if (!evidence?.length) {
+    return "No evidence details returned.";
+  }
+  return evidence
+    .map((item) => {
+      const details = item.details && Object.keys(item.details).length
+        ? ` · ${formatEvidenceDetailsObject(item.details)}`
+        : "";
+      const decisive = item.decisive ? " decisive" : "";
+      return `${(item.source || "source").replaceAll("_", " ")} ${item.status || "unknown"} ${numericText(item.score)}${decisive}${details}`;
+    })
+    .join("; ");
+}
+
+function formatEvidenceDetailsObject(details: Record<string, unknown>): string {
+  return Object.entries(details)
+    .slice(0, 5)
+    .map(([key, value]) => `${key.replaceAll("_", " ")}=${formatCompactUnknown(value)}`)
+    .join(", ");
+}
+
+function formatCompactUnknown(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.slice(0, 4).map(formatCompactUnknown).join(", ")}${value.length > 4 ? ", …" : ""}]`;
+  }
+  if (value && typeof value === "object") {
+    return "{…}";
+  }
+  return String(value ?? "—");
+}
+
+function matchStrengthVariant(strength: MatchReport["candidate_strength"]): "default" | "secondary" | "outline" {
+  if (strength === "strong") {
+    return "default";
+  }
+  if (strength === "medium") {
+    return "secondary";
+  }
+  return "outline";
+}
+
+function searchResultFromMatchReport(report: MatchReport): SearchResult | null {
+  const track = report.track_b;
+  if (!track?.path) {
+    return null;
+  }
+  return {
+    track_id: track.track_id || track.path,
+    path: track.path,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    score: report.candidate_score ?? report.confidence_score ?? 0,
+    confidence: report.confidence ?? null,
+    why: report.candidate_reasons?.length ? report.candidate_reasons : report.reasons,
+  };
 }
 
 function IndexHealthCard({ health }: { health: IndexHealthPayload }) {
@@ -2191,6 +2388,9 @@ function ResultCard({
   onPlay,
   onReveal,
   onMatch,
+  matchPayload,
+  matchLoading,
+  debugMode,
   playingTrackId,
 }: {
   result: SearchResult;
@@ -2200,6 +2400,9 @@ function ResultCard({
   onPlay: (result: SearchResult) => Promise<void>;
   onReveal: (result: SearchResult) => Promise<void>;
   onMatch: (result: SearchResult) => Promise<void>;
+  matchPayload: MatchTrackPayload | null;
+  matchLoading: boolean;
+  debugMode: boolean;
   playingTrackId: string | null;
 }) {
   const [savedRating, setSavedRating] = useState<"good" | "bad" | "neutral" | null>(
@@ -2216,13 +2419,14 @@ function ResultCard({
     : "";
   const rankReasonText = formatRankReason(result.rank_reason);
   const evidenceText = formatCandidateEvidence(result.candidate_evidence);
-  const hasLongContent =
-    why.length > 180 ||
-    tagText.length > 140 ||
-    rankReasonText.length > 160 ||
-    evidenceText.length > 160 ||
-    result.path.length > 120 ||
-    title.length > 80;
+  const hasLongContent = debugMode
+    ? why.length > 180 ||
+      tagText.length > 140 ||
+      rankReasonText.length > 160 ||
+      evidenceText.length > 160 ||
+      result.path.length > 120 ||
+      title.length > 80
+    : why.length > 180 || title.length > 80;
   const isPlaying = playingTrackId === result.track_id;
 
   useEffect(() => {
@@ -2274,16 +2478,16 @@ function ResultCard({
         )}
       >
         <p className="wrap-anywhere text-sm text-muted-foreground">{why}</p>
-        {rankReasonText ? (
+        {debugMode && rankReasonText ? (
           <p className="wrap-anywhere text-xs text-muted-foreground">Rank: {rankReasonText}</p>
         ) : null}
-        {evidenceText ? (
+        {debugMode && evidenceText ? (
           <p className="wrap-anywhere text-xs text-muted-foreground">Evidence: {evidenceText}</p>
         ) : null}
-        {tagText ? (
+        {debugMode && tagText ? (
           <p className="wrap-anywhere text-xs text-muted-foreground">Tags: {tagText}</p>
         ) : null}
-        <p className="wrap-anywhere text-xs text-muted-foreground">{result.path}</p>
+        {debugMode ? <p className="wrap-anywhere text-xs text-muted-foreground">{result.path}</p> : null}
       </div>
       {hasLongContent ? (
         <Button
@@ -2305,9 +2509,9 @@ function ResultCard({
             <FolderOpen className="h-3.5 w-3.5" />
             Show
           </Button>
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void onMatch(result)}>
-            <ListChecks className="h-3.5 w-3.5" />
-            Matches
+          <Button size="sm" variant={matchPayload ? "secondary" : "outline"} disabled={busy || matchLoading} onClick={() => void onMatch(result)}>
+            {matchLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListChecks className="h-3.5 w-3.5" />}
+            {matchPayload ? "Hide matches" : "Matches"}
           </Button>
         </div>
         <div className="grid gap-1 sm:justify-items-end">
@@ -2358,6 +2562,24 @@ function ResultCard({
           ) : null}
         </div>
       </div>
+      {matchPayload ? (
+        <MatchSummaryPanel
+          payload={matchPayload}
+          debugMode={debugMode}
+          onPlayCandidate={(report) => {
+            const candidate = searchResultFromMatchReport(report);
+            if (candidate) {
+              void onPlay(candidate);
+            }
+          }}
+          onRevealCandidate={(report) => {
+            const candidate = searchResultFromMatchReport(report);
+            if (candidate) {
+              void onReveal(candidate);
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -2399,10 +2621,96 @@ function formatCount(label: string, value: number | undefined): string | null {
   return value === undefined ? null : `${value} ${label}`;
 }
 
+type BuildIndexStepsOptions = {
+  musicFolder: string;
+  analysisMode: IndexAnalysisMode;
+  resourceProfile: string;
+  semanticModel: string;
+};
+
+function buildIndexSteps(options: BuildIndexStepsOptions): IndexStep[] {
+  return [
+    {
+      id: "scan",
+      label: "Scan files",
+      args: () => ["scan", required(options.musicFolder, "Music folder"), "--json"],
+    },
+    {
+      id: "metadata",
+      label: "Read metadata",
+      args: () => ["metadata", "--missing-only", "--json"],
+    },
+    {
+      id: "repair-metadata",
+      label: "Repair metadata",
+      args: () => [
+        "repair-metadata",
+        "--from-filename",
+        "--from-duplicates",
+        "--missing-only",
+        "--json",
+      ],
+    },
+    {
+      id: "fingerprint",
+      label: "Fingerprint",
+      args: () => ["fingerprint", "--missing-only", "--json"],
+    },
+    {
+      id: "basic",
+      label: "Audio features",
+      args: () => basicAnalysisArgs(options.analysisMode, options.resourceProfile),
+    },
+    {
+      id: "tags",
+      label: "ML tags",
+      args: () => tagAnalysisArgs(options.resourceProfile),
+    },
+    {
+      id: "derived",
+      label: "Derived tags + context fit",
+      args: () => ["rebuild-derived", "--json"],
+    },
+    {
+      id: "profiles",
+      label: "Rebuild profiles",
+      args: () => ["rebuild-profiles", "--json"],
+    },
+    {
+      id: "embed",
+      label: "Profile embeddings",
+      args: () => embeddingArgs(options.resourceProfile, options.semanticModel),
+    },
+  ];
+}
+
 function basicAnalysisArgs(mode: IndexAnalysisMode, resourceProfile: string): string[] {
   const args = ["analyze-basic"];
   args.push("--chunked", "--chunk-sec", mode === "full" ? "300" : "auto");
   args.push("--workers", "auto", "--resource-profile", resourceProfile, "--json");
+  return args;
+}
+
+function tagAnalysisArgs(resourceProfile: string): string[] {
+  return [
+    "analyze-tags",
+    "--missing-only",
+    "--workers",
+    "auto",
+    "--resource-profile",
+    resourceProfile,
+    "--subprocess-batches",
+    "--batch-size",
+    "auto",
+    "--json",
+  ];
+}
+
+function embeddingArgs(resourceProfile: string, semanticModel: string): string[] {
+  const args = ["embed", "--batch-size", "auto", "--resource-profile", resourceProfile, "--json"];
+  if (semanticModel.trim()) {
+    args.splice(1, 0, "--model", semanticModel.trim());
+  }
   return args;
 }
 
@@ -2446,9 +2754,66 @@ function searchSuggestionsFromDiagnostics(diagnostics: Record<string, unknown>):
       confidence: typeof record.confidence === "number" ? record.confidence : undefined,
       reason: typeof record.reason === "string" ? record.reason : undefined,
       kind: typeof record.kind === "string" ? record.kind : undefined,
+      type: typeof record.type === "string" ? record.type : undefined,
+      label: typeof record.label === "string" ? record.label : undefined,
     });
   }
   return suggestions;
+}
+
+function searchTypeExamplesFromDiagnostics(diagnostics: Record<string, unknown>): SearchTypeExample[] {
+  const value = diagnostics.search_type_examples;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const examples: SearchTypeExample[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    examples.push({
+      type: typeof record.type === "string" ? record.type : undefined,
+      label: typeof record.label === "string" ? record.label : undefined,
+      query: typeof record.query === "string" ? record.query : null,
+      reason: typeof record.reason === "string" ? record.reason : undefined,
+    });
+  }
+  return examples;
+}
+
+function compactSearchSuggestions(suggestions: SearchSuggestion[]): SearchSuggestion[] {
+  const seen = new Set<string>();
+  const deduped = suggestions.filter((suggestion) => {
+    const key = suggestion.query.trim().toLowerCase();
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+  const corrections = deduped.filter((suggestion) => suggestion.kind === "correction").slice(0, 3);
+  const examples = deduped.filter((suggestion) => suggestion.kind !== "correction").slice(0, 5);
+  return corrections.length ? [...corrections, ...examples] : examples.slice(0, 6);
+}
+
+function compactSearchTypeExamples(examples: SearchTypeExample[]): SearchTypeExample[] {
+  const preferredTypes = [
+    "mood",
+    "context",
+    "occasion",
+    "feature_sort",
+    "feature_filter",
+    "vocals",
+    "negation",
+    "closest_tracks",
+  ];
+  const byType = new Map(examples.map((example) => [example.type, example]));
+  const preferred = preferredTypes
+    .map((type) => byType.get(type))
+    .filter((example): example is SearchTypeExample => Boolean(example));
+  const remainder = examples.filter((example) => !example.type || !preferredTypes.includes(example.type));
+  return [...preferred, ...remainder].slice(0, 8);
 }
 
 function searchNoticeFromDiagnostics(diagnostics: Record<string, unknown>): SearchNotice | null {
@@ -2461,6 +2826,27 @@ function searchNoticeFromDiagnostics(diagnostics: Record<string, unknown>): Sear
     level: typeof record.level === "string" ? record.level : undefined,
     message: typeof record.message === "string" ? record.message : undefined,
   };
+}
+
+function searchNoticeDisplayText(notice: SearchNotice, debugMode: boolean): string {
+  const message = notice.message?.trim() || "";
+  if (!message) {
+    return "";
+  }
+  if (debugMode) {
+    return message;
+  }
+  const lower = message.toLowerCase();
+  if (lower.includes("no strong local evidence")) {
+    return "No strong local evidence found. Try one of the suggestions below.";
+  }
+  if (lower.includes("low confidence") || lower.includes("weak")) {
+    return "Best matches look weak. Try a more specific query, or enable Debug mode for score details.";
+  }
+  if (lower.includes("semantic")) {
+    return "Results rely mostly on similarity signals. Try adding an artist, genre, mood, or feature.";
+  }
+  return message;
 }
 
 function chipList(values: string[] | undefined, max = 8): string {
@@ -2492,6 +2878,28 @@ function formatSortSpec(spec: SearchSortSpec): string {
   const field = (spec.field || "unknown").replaceAll("_", " ");
   const direction = spec.direction === "asc" ? "lowest first" : "highest first";
   return `${field} ${direction}`;
+}
+
+function searchEvidenceCountStages(diagnostics: Record<string, unknown>): EvidenceCountStages {
+  return [
+    ["scored", recordValue(diagnostics.scored_evidence_source_counts)],
+    ["filtered", recordValue(diagnostics.filtered_evidence_source_counts)],
+    ["limited", recordValue(diagnostics.limited_evidence_source_counts)],
+  ] as const;
+}
+
+function formatSearchDiagnostics(diagnostics: Record<string, unknown>, scoreWarnings: string[]): string {
+  return [
+    metricText("top", diagnostics.top_raw_score),
+    metricText("filtered", diagnostics.filtered_candidate_count),
+    diagnostics.duplicate_suppression_enabled === false
+      ? "duplicates shown"
+      : metricText("deduped", diagnostics.duplicate_suppressed_count),
+    diagnostics.diversity_suppression_enabled === false ? "same artists shown" : null,
+    scoreWarnings.length ? `warnings ${scoreWarnings.join(", ")}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function formatEvidenceCountStages(
@@ -2538,6 +2946,27 @@ function formatRankReason(reason: SearchResult["rank_reason"]): string {
       : null,
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+function formatMatchCandidateScores(scores: Record<string, number>): string {
+  const ordered = [
+    "name",
+    "content_hash",
+    "chromaprint",
+    "fingerprint_similarity",
+    "duration",
+    "artist_similarity",
+    "artist_title_norm",
+    "album_similarity",
+    "filename_stem",
+    "feature_similarity",
+    "audio_embedding",
+  ];
+  return ordered
+    .map((key) => [key, scores[key]] as const)
+    .filter(([, value]) => typeof value === "number" && Number.isFinite(value) && value > 0)
+    .map(([key, value]) => `${key.replaceAll("_", " ")} ${numericText(value)}`)
+    .join(" · ") || "none";
 }
 
 function formatCandidateEvidence(evidence: SearchResult["candidate_evidence"]): string {
