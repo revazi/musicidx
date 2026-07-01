@@ -56,6 +56,38 @@ Expected use:
 - show runtime diagnostics from `duration_sec`, `peak_memory_mb`, `child_peak_memory_mb`, and `diagnostics`
 - keep long-running steps cancellable at the process/process-tree level
 
+### Indexed-library browser
+
+```bash
+musicidx browse --path <indexed-folder> --json
+musicidx browse --path <indexed-folder> --query "artist or title words" --sort artist --offset 0 --limit 50 --json
+```
+
+Expected use:
+
+- browse indexed roots/folders/files before running a semantic/music search
+- run simple SQLite keyword search across title, artist, album, genre, album artist, and path/filename
+- sort and page track rows server-side so libraries with thousands of tracks remain usable
+- navigate only through SQLite-backed library contents; the command does not walk the filesystem
+- provide Play / Show / Matches actions from returned track rows
+
+Top-level payload fields:
+
+| Field | Meaning |
+| --- | --- |
+| `roots` | Indexed library roots with `path`, display `name`, and active `track_count`. |
+| `cwd` | Current indexed folder being displayed. |
+| `root` | Indexed root containing `cwd`, if any. |
+| `parent` | Parent folder path within the indexed root, or `null` at the root. |
+| `folders` | Direct child folders synthesized from indexed track paths. |
+| `tracks` | Paginated track rows; in browse mode these are direct children of `cwd`, and in search mode these are recursive keyword matches under `cwd`. Includes `track_id`, `path`, metadata, `duration_sec`, `bpm`, and `missing`. |
+| `track_count` | Total matching/direct track rows before `limit`/`offset`. |
+| `limit` / `offset` / `has_more` | Pagination controls for large libraries. |
+| `mode` | `browse` or `search`. |
+| `query` | Simple keyword query used for search mode. |
+| `sort` / `sort_direction` | Server-side track sort, e.g. `artist asc`, `title asc`, `bpm desc`, `duration desc`, or `path asc`. |
+| `warning` | Optional navigation warning, for example when a requested path is outside indexed roots. |
+
 Common indexing diagnostics fields:
 
 | Field | Meaning |
@@ -157,7 +189,7 @@ musicidx search "chill bar" --format json --concise --limit 10 --explain
 
 Important top-level fields:
 
-Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, suppresses low-relevance semantic-only fallback results, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `minimum_semantic_only_relevance`, `sort_by`, `score_warnings`, `duplicate_suppressed_count`, `scored_evidence_source_counts`, `filtered_evidence_source_counts`, `limited_evidence_source_counts`, `result_evidence_source_counts`, `result_notice`, and `suggested_queries`.
+Local non-LLM ranking now filters weak fallback candidates when there are no meaningful text/tag/feature/semantic matches, discounts very low-confidence best-guess tags for ranking, suppresses low-relevance semantic-only fallback results, expands common mood/feature language such as `upbeat`, `mellow`, `groovy`, `lo-fi`, `not aggressive`, and `no vocals`, and supports natural-language feature sorting such as `highest BPM`, `slowest`, `most energetic`, `least aggressive`, `most danceable`, `brightest`, and `darkest`. Search results do not hide exact duplicates, near-duplicates, or same-artist repeats; users can inspect matches from result cards. Diagnostics include `filtered_candidate_count`, `minimum_result_score`, `minimum_ranking_tag_score`, `minimum_semantic_only_relevance`, `sort_by`, `score_warnings`, `duplicate_suppression_enabled`, `duplicate_suppressed_count`, `diversity_suppression_enabled`, `scored_evidence_source_counts`, `filtered_evidence_source_counts`, `limited_evidence_source_counts`, `result_evidence_source_counts`, `result_notice`, `suggested_queries`, and `search_type_examples`.
 
 | Field | Meaning |
 | --- | --- |
@@ -167,7 +199,7 @@ Local non-LLM ranking now filters weak fallback candidates when there are no mea
 | `llm_error` | LLM failure/guardrail message when `--llm` fallback occurred. |
 | `llm_hints` | Raw LLM-provided hints that passed guardrails, shown separately from merged local intent. |
 | `intent` | Compact parsed intent after local parser + accepted LLM hints are merged. |
-| `diagnostics` | Candidate counts, ranking weights, semantic errors, score calibration, weak-score warnings, duplicate suppression counts, no/weak-result notices, and suggested query corrections/examples. |
+| `diagnostics` | Candidate counts, ranking weights, semantic errors, score calibration, weak-score warnings, duplicate visibility/suppression flags, no/weak-result notices, suggested query corrections/examples, and `search_type_examples` for UI search-mode guidance. |
 | `results` | Ranked result list. |
 
 Important result fields:
@@ -198,7 +230,7 @@ musicidx eval-matches <match-eval.json> --json
 
 `compare-tracks` returns `{ "db_path": "...", "report": { ... } }`. `match-track` returns `{ "db_path": "...", "track_id": "...", "count": n, "reports": [...] }`.
 
-`match-track` searches against indexed library candidates by default; `--against-library` is an explicit readability/compatibility flag. `eval-matches` loads `{ "matches": [...] }` files and checks expected decisions/evidence/warnings for repeatable MatchReport regressions. `eval/matching_regressions.example.json` shows the expected file shape with placeholder track IDs. See `docs/matching.md` for MatchReport decision policy.
+`match-track` searches against indexed library candidates by default; `--against-library` is an explicit readability/compatibility flag. Search results do not hide duplicate-looking files; `match-track` is the inline result-card inspection layer. It returns the closest 3–5 candidates sorted by `candidate_score` descending. The score prioritizes content hash / exact Chromaprint / decoded Chromaprint soundwave alignment, then stop-word-aware name similarity, duration, artist/title/album metadata, filename, features, and optional audio embeddings. Running indexing/fingerprinting backfills decoded Chromaprint frames in SQLite for existing encoded fingerprints. Dissimilar fuzzy fingerprint noise is ignored for candidate ranking. It can include exact duplicates, same-recording candidates, possible metadata/filename-stem matches, related versions, audio-similar-only candidates, and informative `no_identity_match` reports where advisory evidence matched but content hash/chromaprint disagreed. `eval-matches` loads `{ "matches": [...] }` files and checks expected decisions/evidence/warnings for repeatable MatchReport regressions. `eval/matching_regressions.example.json` shows the expected file shape with placeholder track IDs. See `docs/matching.md` for MatchReport decision policy.
 
 Important `MatchReport` fields:
 
@@ -207,8 +239,9 @@ Important `MatchReport` fields:
 | `schema_version` | MatchReport JSON schema version, currently `1`. |
 | `decision` | Deterministic result such as `exact_duplicate`, `same_recording`, `possible_metadata_match`, `related_version_not_duplicate`, `sound_similar_only`, `no_identity_match`, or `insufficient_evidence`. |
 | `identity_decision` | `same`, `possible`, or `unknown`; only content hash / chromaprint can produce `same`. |
-| `confidence` / `confidence_score` | Human and numeric confidence for the report. |
-| `evidence` | Per-source evidence from `content_hash`, `chromaprint`, `duration`, `artist_title_norm`, `version_conflict`, and optional `audio_embedding`, including source role and match/mismatch/missing/conflict/similar status. |
+| `confidence` / `confidence_score` | Conservative identity confidence for the report. |
+| `candidate_score` / `candidate_kind` / `candidate_strength` / `candidate_summary` / `candidate_reasons` / `candidate_scores` | Closest-candidate category, strength label, ranking score, compact reasons, and per-signal score breakdown. This is for inspection/ranking only, not identity. |
+| `evidence` | Per-source evidence from `name`, `content_hash`, `chromaprint`, `fingerprint_similarity`, `duration`, `artist_similarity`, `artist_title_norm`, `album_similarity`, `filename_stem`, `feature_similarity`, `version_conflict`, and optional `audio_embedding`, including source role and match/mismatch/missing/conflict/similar status. |
 | `policy` | Explicit policy: semantic embeddings, audio embeddings, and LLMs are not used for identity. |
 
 ### Evaluation and feedback
