@@ -688,6 +688,48 @@ def test_search_music_preserves_high_bpm_for_drum_and_bass(tmp_path):
         conn.close()
 
 
+def test_search_music_halves_hip_hop_double_time_for_high_bpm_sort(tmp_path):
+    conn = connect_db(tmp_path / "index.sqlite")
+    try:
+        init_db(conn)
+        _insert_track(
+            conn,
+            "hip-hop-double-time",
+            tmp_path / "hip-hop.mp3",
+            title="Rap Double Time",
+            artist="Artist A",
+            genre="Rap",
+            profile_text="rap hip hop track",
+            tags=[("essentia:genre-discogs400", "hip hop---gangsta", 0.9)],
+            energy=0.80,
+            aggression=0.30,
+            danceability=0.60,
+            bpm=161.499,
+        )
+        _insert_track(
+            conn,
+            "true-fast",
+            tmp_path / "true-fast.mp3",
+            title="True Fast",
+            artist="Artist B",
+            profile_text="fast electronic track",
+            tags=[("derived:features", "fast", 1.0)],
+            energy=0.70,
+            aggression=0.20,
+            danceability=0.70,
+            bpm=150.0,
+        )
+
+        response = search_music(conn, "high bpm", explain=True)
+
+        assert response.results[0].track_id == "true-fast"
+        assert response.results[0].breakdown["sort_values"]["tempo_bpm"] == 150.0
+        assert response.results[1].track_id == "hip-hop-double-time"
+        assert response.results[1].breakdown["sort_values"]["tempo_bpm"] == 80.7495
+    finally:
+        conn.close()
+
+
 def test_search_music_sorts_high_bpm_by_feature_not_semantic_or_title(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
@@ -1647,7 +1689,7 @@ def test_search_music_wedding_prefers_reception_friendly_over_hard_club(tmp_path
         conn.close()
 
 
-def test_search_music_suppresses_near_duplicate_metadata_tracks(tmp_path):
+def test_search_music_keeps_near_duplicate_metadata_tracks_visible(tmp_path):
     conn = connect_db(tmp_path / "index.sqlite")
     try:
         init_db(conn)
@@ -1685,9 +1727,11 @@ def test_search_music_suppresses_near_duplicate_metadata_tracks(tmp_path):
         response = search_music(conn, "happy party", limit=10)
 
         track_ids = [result.track_id for result in response.results]
-        assert len({"duplicate-a", "duplicate-b"}.intersection(track_ids)) == 1
+        assert {"duplicate-a", "duplicate-b"}.issubset(track_ids)
         assert "other-track" in track_ids
-        assert response.diagnostics["duplicate_suppressed_count"] == 1
+        assert response.diagnostics["duplicate_suppression_enabled"] is False
+        assert response.diagnostics["duplicate_suppressed_count"] == 0
+        assert response.diagnostics["diversity_suppression_enabled"] is False
     finally:
         conn.close()
 
@@ -1762,8 +1806,22 @@ def test_search_suggests_fallback_examples_for_unstructured_no_result(tmp_path):
         assert [suggestion["kind"] for suggestion in suggestions] == ["example"] * len(
             suggestions
         )
-        assert {"I'm in love", "romantic", "love songs"}.issubset(
-            {suggestion["query"] for suggestion in suggestions}
+        suggestion_queries = {suggestion["query"] for suggestion in suggestions}
+        assert {"I'm in love", "romantic", "love songs"}.issubset(suggestion_queries)
+        assert {"highest BPM techno", "low energy background music"}.issubset(
+            suggestion_queries
+        )
+        assert {"mood", "context", "occasion", "feature_sort", "feature_filter"}.issubset(
+            {suggestion.get("type") for suggestion in suggestions}
+        )
+        search_type_examples = response.diagnostics["search_type_examples"]
+        assert any(
+            example["type"] == "closest_tracks" and example["query"] is None
+            for example in search_type_examples
+        )
+        assert any(
+            example["query"] == "no vocals background music"
+            for example in search_type_examples
         )
     finally:
         conn.close()
