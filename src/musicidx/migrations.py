@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 
+from musicidx.chromaprint_frames import decoded_storage_values
+
 MigrationStep = str | Callable[[sqlite3.Connection], None]
 
 INITIAL_SCHEMA_SQL = """
@@ -248,6 +250,46 @@ def add_versioned_track_profiles(conn: sqlite3.Connection) -> None:
     conn.executescript(TRACK_PROFILE_VERSION_INDEXES_SQL)
 
 
+DECODED_CHROMAPRINT_COLUMNS = {
+    "chromaprint_algorithm": "INTEGER",
+    "chromaprint_frames": "BLOB",
+    "chromaprint_frame_count": "INTEGER",
+}
+
+DECODED_CHROMAPRINT_INDEXES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_tracks_chromaprint_frame_count
+ON tracks(chromaprint_frame_count);
+"""
+
+
+def add_decoded_chromaprint(conn: sqlite3.Connection) -> None:
+    for column, definition in DECODED_CHROMAPRINT_COLUMNS.items():
+        _add_column_if_missing(conn, "tracks", column, definition)
+    conn.executescript(DECODED_CHROMAPRINT_INDEXES_SQL)
+    rows = conn.execute(
+        """
+        SELECT id, chromaprint
+        FROM tracks
+        WHERE COALESCE(chromaprint, '') != ''
+          AND chromaprint_frames IS NULL
+        """
+    ).fetchall()
+    for row in rows:
+        algorithm, frames_blob, frame_count = decoded_storage_values(row["chromaprint"])
+        if frames_blob is None:
+            continue
+        conn.execute(
+            """
+            UPDATE tracks
+            SET chromaprint_algorithm = ?,
+                chromaprint_frames = ?,
+                chromaprint_frame_count = ?
+            WHERE id = ?
+            """,
+            (algorithm, frames_blob, frame_count, row["id"]),
+        )
+
+
 ADD_CONTEXT_FIT_SQL = """
 CREATE TABLE IF NOT EXISTS track_context_fit (
     track_id TEXT NOT NULL,
@@ -272,4 +314,5 @@ MIGRATIONS: list[tuple[int, str, MigrationStep]] = [
     (4, "add_metadata_provenance", add_metadata_provenance),
     (5, "add_versioned_track_profiles", add_versioned_track_profiles),
     (6, "add_context_fit", ADD_CONTEXT_FIT_SQL),
+    (7, "add_decoded_chromaprint", add_decoded_chromaprint),
 ]

@@ -85,7 +85,7 @@ The Tauri UI can:
 - handle a previously indexed music folder disappearing by marking its active tracks missing instead of crashing the watcher
 - refresh derived metadata/fingerprints/features/tags/profiles/embeddings when an existing file is modified
 - keep indexing setup and individual scan/metadata/repair-metadata/fingerprint/basic/tag/derived/profile/embed actions in Settings
-- show manual and background pipeline progress by step, runtime, counts, metadata repairs, derived tag/context counts, profile schema version, and memory diagnostics in a floating progress panel with a Cancel button
+- show a sticky global loader/cancel bar for active commands and manual/background pipeline progress by step, runtime, counts, metadata repairs, derived tag/context counts, profile schema version, and memory diagnostics in a floating progress panel with a Cancel button
 - show an Index health card in Settings with coverage for audio features, derived tags, context-fit scores, profile v2, and embedding freshness
 - enable/disable background auto-indexing and choose a 1/5/10/30/60 minute check interval from Settings
 - choose a manual indexing type: Full-track chunked or Full-track larger chunks
@@ -96,12 +96,13 @@ The Tauri UI can:
 - inspect missing and failed/quarantined tracks from advanced indexing actions
 - prune all missing database rows from advanced indexing actions after confirmation; this never deletes music files
 - reset failed/quarantined tracks for retry from advanced indexing actions
-- stream command stdout/stderr into an expandable live/raw output panel
+- stream command stdout/stderr into an expandable live/raw output panel when Settings → Debug mode is enabled
 - parse natural-language intent
-- run concise JSON search with explanations, calibrated raw scores, confidence labels, duplicate suppression, no/weak-result suggestions, and a visible search-parameters panel
-- render search result cards with in-app audio playback via Tauri asset protocol and a Show action for revealing tracks in the file manager
+- browse and simple-search indexed roots/folders/files with `musicidx browse --json`, including keyword search, server-side sort/pagination for large libraries, and Play / Show / Matches actions on file rows
+- run concise JSON search with explanations, calibrated raw scores, confidence labels, duplicate visibility, no/weak-result suggestions, search-type example guidance, and debug-mode search parameters/rank/evidence details/evidence-source counts
+- render search result cards with in-app audio playback via Tauri asset protocol, a Show action for revealing tracks in the file manager, and an inline Matches action showing the closest 3–5 local candidates by decoded fingerprint/soundwave, name, duration, metadata, features, and optional audio embeddings; each inline match row has its own Play/Show buttons, with evidence details available in Debug mode
 - save good/bad/neutral feedback from result cards
-- show LLM-provided hints separately from the final merged local intent when `--llm` is used
+- show LLM-provided hints separately from the final merged local intent when `--llm` is used and Debug mode is enabled
 - run the starter eval set from advanced indexing actions
 - export M3U playlists from a floating bottom-right icon button
 - store desktop-only settings in browser local storage

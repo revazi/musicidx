@@ -1,0 +1,800 @@
+schema_version: 1
+feature_ranges:
+  energy:
+    very_low:
+    - 0.0
+    - 0.25
+    low:
+    - 0.0
+    - 0.4
+    low_mid:
+    - 0.0
+    - 0.65
+    mid:
+    - 0.25
+    - 0.75
+    mid_high:
+    - 0.4
+    - 1.0
+    high:
+    - 0.55
+    - 1.0
+    very_high:
+    - 0.7
+    - 1.0
+  danceability:
+    very_low:
+    - 0.0
+    - 0.25
+    low:
+    - 0.0
+    - 0.4
+    low_mid:
+    - 0.0
+    - 0.6
+    mid:
+    - 0.3
+    - 0.75
+    mid_high:
+    - 0.45
+    - 1.0
+    high:
+    - 0.6
+    - 1.0
+    very_high:
+    - 0.75
+    - 1.0
+  aggression:
+    very_low:
+    - 0.0
+    - 0.2
+    low:
+    - 0.0
+    - 0.35
+    low_mid:
+    - 0.0
+    - 0.55
+    mid:
+    - 0.25
+    - 0.7
+    mid_high:
+    - 0.4
+    - 1.0
+    high:
+    - 0.6
+    - 1.0
+    very_high:
+    - 0.75
+    - 1.0
+  brightness:
+    very_low:
+    - 0.0
+    - 0.25
+    low:
+    - 0.0
+    - 0.4
+    low_mid:
+    - 0.0
+    - 0.6
+    mid:
+    - 0.25
+    - 0.75
+    mid_high:
+    - 0.4
+    - 1.0
+    high:
+    - 0.6
+    - 1.0
+    very_high:
+    - 0.75
+    - 1.0
+  tempo_bpm:
+    very_low:
+    - 45.0
+    - 80.0
+    low:
+    - 50.0
+    - 95.0
+    low_mid:
+    - 60.0
+    - 115.0
+    mid:
+    - 75.0
+    - 125.0
+    mid_high:
+    - 90.0
+    - 150.0
+    high:
+    - 105.0
+    - 180.0
+    very_high:
+    - 130.0
+    - 210.0
+contexts:
+  chill:
+    keywords:
+    - chill
+    - relax
+    - relaxed
+    - calm
+    - laid back
+    - laid-back
+    prefer:
+    - relaxing
+    - calm
+    - ambient
+    - downtempo
+    - background
+    - soft
+    avoid:
+    - aggressive
+    - hardcore
+    - metal
+    - chaotic
+    - heavy
+    - party
+    - workout
+    features:
+      energy: low
+      aggression: low
+      brightness: low_mid
+  bar:
+    keywords:
+    - bar
+    - lounge
+    - cocktail
+    - cafe
+    - restaurant
+    prefer:
+    - background
+    - relaxing
+    - downtempo
+    - ambient
+    - jazz
+    - soul
+    - lounge
+    avoid:
+    - aggressive
+    - hardcore
+    - metal
+    - chaotic
+    - very loud
+    - party
+    features:
+      energy: low
+      aggression: low
+      brightness: low_mid
+      tempo_bpm: low_mid
+  background:
+    keywords:
+    - background
+    - background music
+    - in the background
+    prefer:
+    - background
+    - ambient
+    - calm
+    - instrumental
+    - soft
+    avoid:
+    - aggressive
+    - chaotic
+    - very energetic
+    - vocal
+    - speech
+    features:
+      energy: low_mid
+      aggression: low
+  cooking:
+    keywords:
+    - cooking
+    - cook
+    - kitchen
+    prefer:
+    - cooking
+    - dinner
+    - background
+    - warm
+    - groovy
+    - pleasant
+    avoid:
+    - aggressive
+    - chaotic
+    - harsh
+    - sleep
+    features:
+      energy: mid
+      aggression: low
+      danceability: mid
+  dinner:
+    keywords:
+    - dinner
+    - supper
+    - dining
+    prefer:
+    - dinner
+    - warm
+    - lounge
+    - background
+    - soft
+    - pleasant
+    avoid:
+    - aggressive
+    - chaotic
+    - workout
+    - hardcore
+    - very energetic
+    features:
+      energy: low_mid
+      aggression: low
+      brightness: low_mid
+  no_vocals_background:
+    keywords:
+    - no vocals
+    - without vocals
+    - instrumental background
+    - no voice
+    prefer:
+    - instrumental
+    - background
+    - ambient
+    - calm
+    - no vocals
+    avoid:
+    - vocal
+    - vocals
+    - speech
+    - singer
+    - rap
+    features:
+      energy: low_mid
+      aggression: low
+  driving:
+    keywords:
+    - driving
+    - drive
+    - road trip
+    - car music
+    prefer:
+    - driving
+    - groove
+    - energetic
+    - steady
+    - upbeat
+    avoid:
+    - sleep
+    - meditative
+    - chaotic
+    features:
+      energy: mid_high
+      danceability: mid_high
+      tempo_bpm: mid_high
+  shower:
+    keywords:
+    - shower
+    - morning
+    prefer:
+    - happy
+    - upbeat
+    - energetic
+    - fun
+    - pop
+    - dance
+    - synth-pop
+    avoid:
+    - sleep
+    - sad
+    - dark
+    - drone
+    - meditative
+    features:
+      energy: high
+      danceability: mid_high
+      tempo_bpm: mid_high
+  melancholic:
+    keywords:
+    - sad
+    - melancholic
+    - melancholy
+    - blue
+    - heartbreak
+    - reflective
+    - introspective
+    prefer:
+    - sad
+    - melancholic
+    - emotional
+    - dark
+    - romantic
+    - meditative
+    - reflective
+    - introspective
+    avoid:
+    - party
+    - very energetic
+    - aggressive
+    features:
+      energy: low
+      brightness: low
+      aggression: low
+  party:
+    keywords:
+    - party
+    - club
+    - dancefloor
+    - celebration
+    prefer:
+    - party
+    - happy
+    - dance
+    - energetic
+    - house
+    - disco
+    - pop
+    avoid:
+    - sleep
+    - sad
+    - meditative
+    features:
+      energy: high
+      danceability: high
+      tempo_bpm: mid_high
+  wedding:
+    keywords:
+    - wedding
+    - weddings
+    - wedding reception
+    - reception
+    prefer:
+    - romantic
+    - love
+    - happy
+    - uplifting
+    - feel good
+    - warm
+    - party
+    - disco
+    - pop
+    - soul
+    avoid:
+    - aggressive
+    - hardcore
+    - hard techno
+    - dark
+    - chaotic
+    - workout
+    - sleep
+    - sad
+    features:
+      energy: mid
+      danceability: mid_high
+      aggression: low
+      tempo_bpm: mid
+  workout:
+    keywords:
+    - workout
+    - gym
+    - run
+    - running
+    - exercise
+    - training
+    prefer:
+    - energetic
+    - powerful
+    - sport
+    - upbeat
+    - fast
+    avoid:
+    - sleep
+    - soft
+    - meditative
+    features:
+      energy: very_high
+      tempo_bpm: high
+      aggression: mid_high
+  focus:
+    keywords:
+    - focus
+    - study
+    - work
+    - coding
+    - concentrate
+    - reading
+    prefer:
+    - background
+    - ambient
+    - meditative
+    - calm
+    - minimal
+    - deep
+    avoid:
+    - aggressive
+    - party
+    - very energetic
+    features:
+      energy: low
+      aggression: low
+      brightness: low_mid
+  sleep:
+    keywords:
+    - sleep
+    - sleepy
+    - bed
+    - night
+    - nap
+    - dream
+    prefer:
+    - relaxing
+    - calm
+    - meditative
+    - ambient
+    - soft
+    - slow
+    - soundscape
+    avoid:
+    - party
+    - energetic
+    - aggressive
+    - fast
+    features:
+      energy: very_low
+      aggression: very_low
+      brightness: low
+      tempo_bpm: low
+  ambient:
+    keywords:
+    - ambient
+    - atmospheric
+    - spacey
+    - soundscape
+    prefer:
+    - ambient
+    - background
+    - soundscape
+    - space
+    - meditative
+    - deep
+    avoid:
+    - aggressive
+    - hardcore
+    features:
+      aggression: low
+      brightness: low_mid
+  romantic:
+    keywords:
+    - romantic
+    - love
+    - date
+    prefer:
+    - romantic
+    - love
+    - emotional
+    - soft
+    - relaxing
+    avoid:
+    - aggressive
+    - chaotic
+    features:
+      energy: low_mid
+      aggression: low
+  happy:
+    keywords:
+    - happy
+    - feel good
+    - feel-good
+    - uplifting
+    - positive
+    - upbeat
+    prefer:
+    - happy
+    - positive
+    - uplifting
+    - fun
+    - upbeat
+    - energetic
+    avoid:
+    - sad
+    - dark
+    - melancholic
+    features:
+      energy: mid_high
+      danceability: mid_high
+  dark:
+    keywords:
+    - dark
+    - moody
+    - noir
+    prefer:
+    - dark
+    - deep
+    - emotional
+    - ambient
+    avoid:
+    - happy
+    - party
+    features:
+      brightness: low
+      aggression: low_mid
+query_priors:
+  energetic:
+    keywords:
+    - energetic
+    - high energy
+    - high-energy
+    - pumped
+    - pumping
+    prefer:
+    - energetic
+    - energy
+    - upbeat
+    - powerful
+    - intense
+    avoid:
+    - sleep
+    - sleepy
+    - quiet
+    - calm
+    features:
+      energy: high
+  low_energy:
+    keywords:
+    - low energy
+    - low-energy
+    - quiet
+    - mellow
+    - soft
+    - gentle
+    prefer:
+    - calm
+    - mellow
+    - soft
+    - gentle
+    - relaxing
+    avoid:
+    - aggressive
+    - hardcore
+    - chaotic
+    - very energetic
+    features:
+      energy: low_mid
+      aggression: low
+  danceable:
+    keywords:
+    - dance
+    - danceable
+    - dancy
+    - danciest
+    - groove
+    - groovy
+    prefer:
+    - dance
+    - danceable
+    - danceability
+    - groove
+    - groovy
+    - disco
+    - house
+    avoid:
+    - drone
+    - ambient sleep
+    features:
+      danceability: high
+      energy: mid_high
+  fast:
+    keywords:
+    - fast
+    - faster
+    - uptempo
+    - up-tempo
+    - high bpm
+    - high-bpm
+    - high tempo
+    - high-tempo
+    - fast bpm
+    - fast tempo
+    prefer:
+    - fast
+    - uptempo
+    - energetic
+    avoid:
+    - slow
+    - sleepy
+    features:
+      tempo_bpm: high
+      energy: mid_high
+  slow:
+    keywords:
+    - slow
+    - slower
+    - downtempo
+    - down-tempo
+    - low bpm
+    - low-bpm
+    prefer:
+    - slow
+    - downtempo
+    - calm
+    - relaxing
+    avoid:
+    - fast
+    - hardcore
+    features:
+      tempo_bpm: low
+      energy: low_mid
+  aggressive:
+    keywords:
+    - aggressive
+    - hard
+    - heavy
+    - intense
+    - brutal
+    - chaotic
+    prefer:
+    - aggressive
+    - hard
+    - heavy
+    - intense
+    - powerful
+    avoid:
+    - sleep
+    - soft
+    - calm
+    features:
+      aggression: high
+      energy: mid_high
+  not_aggressive:
+    keywords:
+    - not aggressive
+    - less aggressive
+    - low aggression
+    - non aggressive
+    - non-aggressive
+    prefer:
+    - soft
+    - calm
+    - gentle
+    - relaxing
+    - low aggression
+    avoid:
+    - aggressive
+    - hardcore
+    - heavy
+    - chaotic
+    features:
+      aggression: low
+      energy: low_mid
+  bright:
+    keywords:
+    - bright
+    - brighter
+    - sparkly
+    - shimmering
+    - shiny
+    prefer:
+    - bright
+    - sparkly
+    - uplifting
+    - shimmering
+    avoid:
+    - dark
+    - muddy
+    features:
+      brightness: high
+  dark:
+    keywords:
+    - dark
+    - darker
+    - moody
+    - noir
+    - shadowy
+    prefer:
+    - dark
+    - moody
+    - deep
+    - noir
+    avoid:
+    - bright
+    - happy
+    features:
+      brightness: low
+  instrumental:
+    keywords:
+    - instrumental
+    - no vocals
+    - without vocals
+    - vocal-free
+    - vocal free
+    prefer:
+    - instrumental
+    - background
+    - ambient
+    - minimal
+    avoid:
+    - vocal
+    - vocals
+    - singer
+    - singalong
+    features: {}
+  vocal:
+    keywords:
+    - vocal
+    - vocals
+    - singing
+    - singer
+    - singalong
+    prefer:
+    - vocal
+    - vocals
+    - singing
+    - singer
+    - song
+    avoid:
+    - instrumental
+    features: {}
+  lofi:
+    keywords:
+    - lofi
+    - lo-fi
+    - lo fi
+    prefer:
+    - lofi
+    - lo-fi
+    - hip hop
+    - beats
+    - chill
+    - background
+    avoid:
+    - aggressive
+    - party
+    features:
+      energy: low_mid
+      aggression: low
+occasion_contexts:
+- driving
+- party
+- shower
+- wedding
+- workout
+query_concept_stop_words:
+- best
+- by
+- fastest
+- find
+- good
+- great
+- highest
+- least
+- library
+- list
+- local
+- lowest
+- most
+- nice
+- 'no'
+- not
+- order
+- please
+- recommend
+- recommendations
+- show
+- slowest
+- some
+- sort
+- stuff
+- top
+- vibe
+- vibes
+semantic_roles:
+  feature_sort: tie_breaker_when_content_else_supporting_tie_breaker
+  metadata_exact: fallback
+  tag_genre: supporting
+  feature_filter: supporting
+  context_vibe: primary_evidence
+  occasion: primary_evidence
+  fallback_semantic: primary_evidence
+identity_policy:
+  fingerprint: identity_matching_not_search_ranking
+  content_hash: identity_matching_not_search_ranking
+  audio_embedding: similarity_only_not_identity
+  semantic_profile_embedding: candidate_and_evidence_only
+  llm: advisory_context_expansion_only

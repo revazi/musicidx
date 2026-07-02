@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from musicidx.analyzer.embeddings import EmbeddingError, search_semantic
+from musicidx.search.evidence import build_candidate_evidence
 from musicidx.search.explain import build_explanation
 from musicidx.search.feedback import latest_feedback_for_query
 from musicidx.search.intent import (
@@ -21,18 +22,46 @@ from musicidx.search.intent import (
     normalize_terms,
     parse_intent_dynamic,
 )
+from musicidx.search.plan import classify_search_mode, content_query_terms, semantic_role_for_intent
+from musicidx.tempo import perceived_tempo_bpm
 
 MIN_RANKING_TAG_SCORE = 0.20
 MIN_RESULT_SCORE = 0.05
 WEAK_TOP_RESULT_SCORE = 0.12
 SEMANTIC_FLOOR = 0.15
 SEMANTIC_CEILING = 0.75
+MIN_SEMANTIC_ONLY_RELEVANCE = 0.45
 GENERIC_EXPLANATION_TAGS = {
     "background_friendly",
     "focus_friendly",
     "no_vocals_background",
 }
-
+RANK_COMPONENTS = ("metadata", "tags", "context", "features", "text", "semantic", "feedback")
+RANK_SCORE_FIELDS = {
+    "metadata": "metadata_score",
+    "tags": "tag_score",
+    "context": "context_score",
+    "features": "feature_score",
+    "text": "text_score",
+    "semantic": "semantic_score",
+    "feedback": "feedback_score",
+}
+RANK_COMPONENT_LABELS = {
+    "metadata": "metadata",
+    "tags": "tags",
+    "context": "context fit",
+    "features": "audio features",
+    "text": "profile text",
+    "semantic": "semantic profile",
+    "feedback": "feedback",
+}
+RANK_SORT_LABELS = {
+    "tempo_bpm": "perceived BPM",
+    "energy": "energy",
+    "danceability": "danceability",
+    "aggression": "aggression",
+    "brightness": "brightness",
+}
 TYPO_SUGGESTION_TERMS = {
     "ambient",
     "bar",
@@ -54,28 +83,85 @@ TYPO_SUGGESTION_TERMS = {
     "workout",
 }
 
-FALLBACK_SEARCH_EXAMPLES = [
+SEARCH_TYPE_EXAMPLES = [
     {
+        "type": "mood",
+        "label": "Mood",
         "query": "I'm in love",
         "reason": "romantic/love mood search",
     },
     {
+        "type": "mood",
+        "label": "Mood",
         "query": "romantic",
         "reason": "broad romantic mood search",
     },
     {
+        "type": "metadata_text",
+        "label": "Title/lyrics-like text",
         "query": "love songs",
         "reason": "direct love-song intent",
     },
     {
+        "type": "context",
+        "label": "Context",
         "query": "chill bar",
         "reason": "context plus mood search",
     },
     {
+        "type": "occasion",
+        "label": "Occasion",
         "query": "wedding reception",
         "reason": "occasion/event search",
     },
+    {
+        "type": "feature_sort",
+        "label": "Feature sort",
+        "query": "highest BPM techno",
+        "reason": "sort matching style/genre candidates by perceived BPM",
+    },
+    {
+        "type": "feature_filter",
+        "label": "Feature filter",
+        "query": "low energy background music",
+        "reason": "filter/rank by audio feature constraints",
+    },
+    {
+        "type": "vocals",
+        "label": "Vocals/instrumental",
+        "query": "no vocals background music",
+        "reason": "find instrumental/background-friendly tracks",
+    },
+    {
+        "type": "negation",
+        "label": "Negation",
+        "query": "dark ambient but not aggressive",
+        "reason": "combine desired mood with explicit exclusions",
+    },
+    {
+        "type": "danceability",
+        "label": "Danceability",
+        "query": "most danceable disco",
+        "reason": "sort matching dance/disco tracks by danceability",
+    },
+    {
+        "type": "context",
+        "label": "Context",
+        "query": "warm lounge bar music",
+        "reason": "multi-word contextual vibe search",
+    },
+    {
+        "type": "closest_tracks",
+        "label": "Closest tracks / remixes",
+        "query": None,
+        "reason": (
+            "Search for a seed track, then click Matches to inspect "
+            "decoded-fingerprint soundwave candidates."
+        ),
+    },
 ]
+
+FALLBACK_SEARCH_EXAMPLES = [item for item in SEARCH_TYPE_EXAMPLES if item.get("query")]
 
 TYPO_SUGGESTION_SKIP_TERMS = {
     "aggression",
@@ -108,6 +194,7 @@ METADATA_STOP_WORDS = {
     "m",
     "me",
     "music",
+    "of",
     "please",
     "recommend",
     "show",
@@ -115,6 +202,8 @@ METADATA_STOP_WORDS = {
     "song",
     "songs",
     "track",
+    "the",
+    "to",
     "tracks",
     "with",
 }
@@ -185,9 +274,12 @@ def search_music(
         include_missing=include_missing,
     )
     feedback_scores = _feedback_scores(conn, query, include_missing=include_missing)
+    mode = classify_search_mode(intent)
+    semantic_role = semantic_role_for_intent(intent, mode=mode)
 
     weights = _weights(
         intent,
+        mode=mode,
         use_semantic=bool(semantic_scores),
         use_feedback=bool(feedback_scores),
         use_context=bool(context_by_track),
@@ -220,24 +312,17 @@ def search_music(
             )
         )
 
-    artist_focused = any(_has_strong_artist_match(result) for result in scored_results)
-    ranked = sorted(
-        scored_results,
-        key=lambda result: (
-            _has_strong_artist_match(result) if artist_focused else False,
-            result.score,
-        ),
-        reverse=True,
-    )
-    filtered = _filter_weak_results(ranked, intent)
+    ranked = _rank_by_mode(scored_results, intent, mode=mode)
+    filtered = _filter_weak_results(ranked, intent, mode=mode)
     sorted_results = _apply_explicit_sort(filtered, intent)
-    deduplicated = _suppress_near_duplicates(sorted_results)
-    diversified = deduplicated if intent.sort_by else _apply_diversity(deduplicated, intent)
+    deduplicated = sorted_results
+    diversified = deduplicated
     limited_results = _with_saved_feedback(
         conn,
         diversified[: intent.limit],
         query=query,
     )
+    limited_results = _with_rank_reasons(limited_results, intent, mode=mode)
     display_results = _with_display_scores(limited_results)
     top_raw_score = _top_raw_score(limited_results)
     suggested_queries = _suggested_queries(intent, limited_results, top_raw_score)
@@ -247,6 +332,8 @@ def search_music(
         "filtered_candidate_count": len(filtered),
         "minimum_result_score": MIN_RESULT_SCORE,
         "minimum_ranking_tag_score": MIN_RANKING_TAG_SCORE,
+        "mode": mode,
+        "semantic_role": semantic_role,
         "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
         "fts_candidate_count": len(fts_scores),
         "semantic_candidate_count": len(semantic_scores),
@@ -258,9 +345,17 @@ def search_music(
         "score_calibration": "weighted_components_divided_by_active_weight_budget",
         "top_raw_score": top_raw_score,
         "weak_top_result_score": WEAK_TOP_RESULT_SCORE,
+        "minimum_semantic_only_relevance": MIN_SEMANTIC_ONLY_RELEVANCE,
         "score_warnings": _score_warnings(top_raw_score, limited_results),
+        "duplicate_suppression_enabled": False,
         "duplicate_suppressed_count": max(0, len(sorted_results) - len(deduplicated)),
+        "diversity_suppression_enabled": False,
+        "scored_evidence_source_counts": _result_evidence_source_counts(scored_results),
+        "filtered_evidence_source_counts": _result_evidence_source_counts(filtered),
+        "limited_evidence_source_counts": _result_evidence_source_counts(limited_results),
+        "result_evidence_source_counts": _result_evidence_source_counts(limited_results),
         "suggested_queries": suggested_queries,
+        "search_type_examples": _search_type_examples(),
         "result_notice": _result_notice(limited_results, top_raw_score, suggested_queries),
     }
     return SearchResponse(
@@ -269,6 +364,140 @@ def search_music(
         results=display_results,
         diagnostics=diagnostics,
     )
+
+
+def _with_rank_reasons(
+    results: list[SearchResult],
+    intent: SearchIntent,
+    *,
+    mode: str,
+) -> list[SearchResult]:
+    output: list[SearchResult] = []
+    for result in results:
+        breakdown = dict(result.breakdown)
+        breakdown["rank_reason"] = _rank_reason(result, intent, mode=mode)
+        breakdown["candidate_evidence"] = build_candidate_evidence(breakdown)
+        output.append(
+            SearchResult(
+                track_id=result.track_id,
+                path=result.path,
+                title=result.title,
+                artist=result.artist,
+                album=result.album,
+                genre=result.genre,
+                score=result.score,
+                breakdown=breakdown,
+                explanation=result.explanation,
+            )
+        )
+    return output
+
+
+def _rank_reason(result: SearchResult, intent: SearchIntent, *, mode: str) -> dict[str, Any]:
+    breakdown = result.breakdown
+    components = _rank_components(breakdown)
+    signals = [component["name"] for component in components]
+    primary = _primary_rank_reason(result, intent, mode=mode, components=components)
+    reason: dict[str, Any] = {
+        "mode": mode,
+        "primary": primary,
+        "summary": _rank_reason_summary(primary),
+        "signals": signals,
+        "components": components[:4],
+    }
+    sort_reason = _rank_sort_reason(result, intent)
+    if sort_reason is not None:
+        reason["sort"] = sort_reason
+    return reason
+
+
+def _rank_components(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
+    for index, name in enumerate(RANK_COMPONENTS):
+        score = float(breakdown.get(RANK_SCORE_FIELDS[name]) or 0.0)
+        if score <= 0.0:
+            continue
+        components.append(
+            {
+                "name": name,
+                "label": RANK_COMPONENT_LABELS.get(name, name),
+                "score": round(score, 6),
+                "_order": index,
+            }
+        )
+    components.sort(key=lambda item: (-float(item["score"]), int(item["_order"])))
+    for component in components:
+        component.pop("_order", None)
+    return components
+
+
+def _primary_rank_reason(
+    result: SearchResult,
+    intent: SearchIntent,
+    *,
+    mode: str,
+    components: list[dict[str, Any]],
+) -> str:
+    breakdown = result.breakdown
+    if intent.sort_by:
+        return "explicit_sort"
+    if mode == "metadata_exact" and float(breakdown.get("metadata_score") or 0.0) > 0.0:
+        return "metadata_match"
+    if mode == "tag_genre" and _has_tag_genre_content_evidence(result):
+        return "tag_genre_match"
+    if mode in {"context_vibe", "occasion"}:
+        if float(breakdown.get("context_score") or 0.0) > 0.0:
+            return "context_fit"
+        if float(breakdown.get("tag_score") or 0.0) > 0.0:
+            return "tag_match"
+    if mode == "feature_filter" and float(breakdown.get("feature_score") or 0.0) > 0.0:
+        return "feature_match"
+    evidence = breakdown.get("evidence") or {}
+    if evidence.get("semantic_only"):
+        return "semantic_fallback"
+    if components:
+        return f"{components[0]['name']}_match"
+    return "local_candidate"
+
+
+def _rank_reason_summary(primary: str) -> str:
+    summaries = {
+        "explicit_sort": "ranked by explicit sort after evidence filtering",
+        "metadata_match": "ranked by metadata/title/artist evidence",
+        "tag_genre_match": "ranked by direct tag, genre, text, or metadata evidence",
+        "context_fit": "ranked by contextual listening-fit evidence",
+        "tag_match": "ranked by matched mood/genre tags",
+        "feature_match": "ranked by requested audio-feature evidence",
+        "semantic_fallback": "ranked by semantic profile fallback evidence only",
+        "local_candidate": "included as a local-library candidate",
+    }
+    return summaries.get(primary, f"ranked by {primary.replace('_', ' ')}")
+
+
+def _rank_sort_reason(result: SearchResult, intent: SearchIntent) -> dict[str, Any] | None:
+    if not intent.sort_by:
+        return None
+    spec = intent.sort_by[0]
+    value = (result.breakdown.get("sort_values") or {}).get(spec.field)
+    return {
+        "field": spec.field,
+        "label": RANK_SORT_LABELS.get(spec.field, spec.field),
+        "direction": spec.direction,
+        "source": spec.source,
+        "value": round(float(value), 6) if isinstance(value, int | float) else None,
+    }
+
+
+def _result_evidence_source_counts(results: list[SearchResult]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        candidate_evidence = result.breakdown.get("candidate_evidence")
+        if not isinstance(candidate_evidence, dict):
+            candidate_evidence = build_candidate_evidence(result.breakdown)
+        for source in candidate_evidence.get("retrieved_by") or []:
+            source_name = str(source)
+            counts[source_name] = counts.get(source_name, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _with_saved_feedback(
@@ -416,7 +645,7 @@ def _suggested_queries(
             continue
         seen.add(key)
         output.append(suggestion)
-    return output[:5]
+    return output[:10]
 
 
 def _should_add_fallback_suggestions(
@@ -438,11 +667,17 @@ def _fallback_search_suggestions() -> list[dict[str, Any]]:
     return [
         {
             "kind": "example",
+            "type": item.get("type"),
+            "label": item.get("label"),
             "query": item["query"],
             "reason": item["reason"],
         }
         for item in FALLBACK_SEARCH_EXAMPLES
     ]
+
+
+def _search_type_examples() -> list[dict[str, Any]]:
+    return [dict(item) for item in SEARCH_TYPE_EXAMPLES]
 
 
 def _suggestion_key(query: str) -> str:
@@ -718,10 +953,11 @@ def _score_track(
     weights: dict[str, float],
 ) -> dict[str, Any]:
     tag_score, matched_tags, avoided_tags = _tag_score(track_tags, intent)
-    feature_score, feature_reasons = _feature_score(row, intent)
+    feature_score, feature_reasons = _feature_score(row, track_tags, intent)
     context_score, matched_contexts = _context_score(context_fit, intent)
     metadata_score, metadata_matches = _metadata_score(row, intent)
     text_score = max(fts_score, _profile_term_score(row["profile_text"] or "", intent.query_terms))
+    direct_content_evidence = _direct_content_evidence(row, track_tags, intent)
 
     weighted_score = (
         weights["semantic"] * semantic_score
@@ -761,6 +997,7 @@ def _score_track(
         "metadata_matches": metadata_matches,
         "feature_reasons": feature_reasons,
         "matched_contexts": matched_contexts,
+        "direct_content_evidence": direct_content_evidence,
         "identity": {
             "content_hash": row["content_hash"],
             "chromaprint": row["chromaprint"],
@@ -768,7 +1005,7 @@ def _score_track(
             "artist_title_norm": row["artist_title_norm"],
         },
         "sort_by": [sort_spec.as_dict() for sort_spec in intent.sort_by],
-        "sort_values": _sort_values(row),
+        "sort_values": _sort_values(row, track_tags),
     }
 
 
@@ -842,9 +1079,12 @@ def _confidence_label(final_score: float, evidence: dict[str, Any]) -> tuple[str
     return confidence, warnings
 
 
-def _sort_values(row: sqlite3.Row) -> dict[str, float | None]:
+def _sort_values(
+    row: sqlite3.Row,
+    track_tags: list[dict[str, Any]],
+) -> dict[str, float | None]:
     return {
-        "tempo_bpm": _safe_row_float(row, "bpm"),
+        "tempo_bpm": _tempo_bpm_for_search(row, track_tags),
         "energy": _safe_row_float(row, "energy"),
         "danceability": _safe_row_float(row, "danceability"),
         "aggression": _safe_row_float(row, "aggression"),
@@ -926,6 +1166,46 @@ def _unique_strings(values: list[str]) -> list[str]:
     return output
 
 
+def _direct_content_evidence(
+    row: sqlite3.Row,
+    track_tags: list[dict[str, Any]],
+    intent: SearchIntent,
+) -> dict[str, Any]:
+    terms = content_query_terms(intent)
+    if not terms:
+        return {
+            "terms": [],
+            "matched_terms": [],
+            "matched_by_source": {},
+            "any": False,
+            "all": False,
+        }
+    metadata_text = " ".join(
+        str(row[key]) for key in ("title", "artist", "album", "genre") if row[key]
+    )
+    profile_text = str(row["profile_text"] or "")
+    tags_text = " ".join(str(tag.get("tag") or "") for tag in track_tags)
+    source_terms = {
+        "metadata": set(normalize_tag_terms(metadata_text)),
+        "profile": set(normalize_tag_terms(profile_text)),
+        "tags": set(normalize_tag_terms(tags_text)),
+    }
+    matched_by_source: dict[str, list[str]] = {}
+    matched_terms: set[str] = set()
+    for source, tokens in source_terms.items():
+        source_matches = [term for term in terms if term in tokens]
+        if source_matches:
+            matched_by_source[source] = source_matches
+            matched_terms.update(source_matches)
+    return {
+        "terms": terms,
+        "matched_terms": sorted(matched_terms),
+        "matched_by_source": matched_by_source,
+        "any": bool(matched_terms),
+        "all": all(term in matched_terms for term in terms),
+    }
+
+
 def _metadata_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[dict[str, Any]]]:
     query_terms = {term for term in intent.query_terms if term not in METADATA_STOP_WORDS}
     if not query_terms:
@@ -968,21 +1248,37 @@ def _metadata_field_score(
 ) -> float:
     if not value:
         return 0.0
-    field_terms = set(normalize_tag_terms(value))
+    ordered_field_terms = normalize_tag_terms(value)
+    field_terms = set(ordered_field_terms)
     if not field_terms:
         return 0.0
-    field_text = " ".join(field_terms)
-    if re.search(rf"\b{re.escape(field_text)}\b", query_text):
+    significant_field_terms = {
+        term for term in ordered_field_terms if term not in METADATA_STOP_WORDS
+    }
+    ordered_field_text = " ".join(ordered_field_terms)
+    significant_field_text = " ".join(
+        term for term in ordered_field_terms if term not in METADATA_STOP_WORDS
+    )
+    if ordered_field_text and re.search(rf"\b{re.escape(ordered_field_text)}\b", query_text):
+        return 1.0
+    if significant_field_text and re.search(
+        rf"\b{re.escape(significant_field_text)}\b",
+        query_text,
+    ):
+        return 1.0
+    if significant_field_terms and significant_field_terms.issubset(query_terms):
         return 1.0
     overlap = field_terms.intersection(query_terms)
-    if len(field_terms) > 1 and field_terms.issubset(query_terms):
-        return 1.0
     if not overlap:
         return 0.0
     if field_name in {"artist", "album_artist"}:
         return 0.85 if any(len(term) >= 5 for term in overlap) else 0.55
     if field_name == "title":
-        return 0.55 if len(field_terms) == 1 and any(len(term) >= 5 for term in overlap) else 0.35
+        has_single_significant_term = len(significant_field_terms or field_terms) == 1
+        has_long_overlap = any(len(term) >= 5 for term in overlap)
+        if has_single_significant_term and has_long_overlap:
+            return 0.55
+        return 0.35
     return 0.30
 
 
@@ -1058,21 +1354,58 @@ def _is_negated_positive_tag(tag_terms: set[str]) -> bool:
     return False
 
 
-def _feature_score(row: sqlite3.Row, intent: SearchIntent) -> tuple[float, list[str]]:
+def _feature_score(
+    row: sqlite3.Row,
+    track_tags: list[dict[str, Any]],
+    intent: SearchIntent,
+) -> tuple[float, list[str]]:
     if not intent.feature_ranges:
         return 0.0, []
 
     scores: list[float] = []
     reasons: list[str] = []
     for field_name, feature_range in intent.feature_ranges.items():
-        column = "bpm" if field_name == "tempo_bpm" else field_name
-        value = row[column]
+        value = _feature_value(row, track_tags, field_name)
         softness = 30.0 if field_name == "tempo_bpm" else 0.20
         score = range_score(value, feature_range.low, feature_range.high, softness=softness)
         scores.append(score)
         if value is not None and _should_explain_feature(field_name, feature_range, score):
             reasons.append(_feature_reason(field_name, float(value), feature_range, score))
     return sum(scores) / len(scores), reasons
+
+
+def _feature_value(
+    row: sqlite3.Row,
+    track_tags: list[dict[str, Any]],
+    field_name: str,
+) -> float | None:
+    if field_name == "tempo_bpm":
+        return _tempo_bpm_for_search(row, track_tags)
+    return _safe_row_float(row, field_name)
+
+
+def _tempo_bpm_for_search(
+    row: sqlite3.Row,
+    track_tags: list[dict[str, Any]],
+) -> float | None:
+    return perceived_tempo_bpm(
+        _safe_row_float(row, "bpm"),
+        descriptors=_tempo_descriptors(row, track_tags),
+    )
+
+
+def _tempo_descriptors(row: sqlite3.Row, track_tags: list[dict[str, Any]]) -> list[str]:
+    descriptors: list[str] = []
+    for key in ("genre", "title", "album", "artist"):
+        value = row[key]
+        if value:
+            descriptors.append(str(value))
+    for tag in track_tags:
+        for key in ("tag", "source"):
+            value = tag.get(key)
+            if value:
+                descriptors.append(str(value))
+    return descriptors
 
 
 def _should_explain_feature(field_name: str, feature_range: Any, score: float) -> bool:
@@ -1085,7 +1418,7 @@ def _should_explain_feature(field_name: str, feature_range: Any, score: float) -
 
 def _feature_reason(field_name: str, value: float, feature_range: Any, score: float) -> str:
     labels = {
-        "tempo_bpm": "BPM",
+        "tempo_bpm": "perceived BPM",
         "energy": "energy",
         "danceability": "danceability",
         "aggression": "aggression",
@@ -1183,10 +1516,99 @@ def _semantic_relevance(cosine_score: float) -> float:
     return (cosine_score - SEMANTIC_FLOOR) / (SEMANTIC_CEILING - SEMANTIC_FLOOR)
 
 
-def _filter_weak_results(results: list[SearchResult], intent: SearchIntent) -> list[SearchResult]:
+def _rank_by_mode(
+    results: list[SearchResult],
+    intent: SearchIntent,
+    *,
+    mode: str,
+) -> list[SearchResult]:
+    artist_focused = any(_has_strong_artist_match(result) for result in results)
+
+    def key(result: SearchResult) -> tuple[Any, ...]:
+        breakdown = result.breakdown
+        metadata_score = float(breakdown.get("metadata_score") or 0.0)
+        tag_score = float(breakdown.get("tag_score") or 0.0)
+        text_score = float(breakdown.get("text_score") or 0.0)
+        context_score = float(breakdown.get("context_score") or 0.0)
+        feature_score = float(breakdown.get("feature_score") or 0.0)
+        semantic_score = float(breakdown.get("semantic_score") or 0.0)
+        if mode == "metadata_exact":
+            return (
+                _has_strong_metadata_match(result),
+                metadata_score,
+                _has_text_or_metadata_content_match(result, require_all=True),
+                text_score,
+                result.score,
+            )
+        if mode == "tag_genre":
+            return (
+                _has_tag_genre_content_evidence(result),
+                tag_score,
+                text_score,
+                metadata_score,
+                semantic_score,
+                result.score,
+            )
+        if mode == "feature_filter":
+            return (feature_score, tag_score, metadata_score, text_score, result.score)
+        if mode == "feature_sort":
+            return (
+                _has_non_feature_query_evidence(result),
+                tag_score,
+                metadata_score,
+                text_score,
+                semantic_score,
+                result.score,
+            )
+        if mode in {"context_vibe", "occasion"}:
+            return (context_score, tag_score, feature_score, semantic_score, result.score)
+        return (
+            _has_strong_artist_match(result) if artist_focused else False,
+            result.score,
+        )
+
+    return sorted(results, key=key, reverse=True)
+
+
+def _filter_weak_results(
+    results: list[SearchResult],
+    intent: SearchIntent,
+    *,
+    mode: str,
+) -> list[SearchResult]:
     if intent.sort_by:
-        return [result for result in results if _has_sort_value(result, intent)]
+        sortable = [result for result in results if _has_sort_value(result, intent)]
+        if _is_sort_only_query(intent):
+            return sortable
+        content_evidence = [
+            result for result in sortable if _has_mode_content_evidence(result, mode=mode)
+        ]
+        if content_evidence:
+            return content_evidence
+        evidence_results = [
+            result for result in sortable if _has_non_feature_query_evidence(result)
+        ]
+        if evidence_results:
+            return evidence_results
+        return sortable
     meaningful = [result for result in results if result.score >= MIN_RESULT_SCORE]
+    if meaningful and mode == "metadata_exact":
+        strong_metadata = [result for result in meaningful if _has_strong_metadata_match(result)]
+        if strong_metadata:
+            return strong_metadata
+        all_term_matches = [
+            result
+            for result in meaningful
+            if _has_text_or_metadata_content_match(result, require_all=True)
+        ]
+        if all_term_matches:
+            return all_term_matches
+    if meaningful and mode == "tag_genre":
+        content_matches = [
+            result for result in meaningful if _has_tag_genre_content_evidence(result)
+        ]
+        if content_matches:
+            return content_matches
     if meaningful and _has_subjective_intent(intent):
         evidence_results = [result for result in meaningful if _has_query_evidence(result)]
         if evidence_results:
@@ -1202,7 +1624,18 @@ def _filter_weak_results(results: list[SearchResult], intent: SearchIntent) -> l
             return [*evidence_results, *feature_backfill[: minimum_count - len(evidence_results)]]
     if meaningful:
         return meaningful
-    return [result for result in results if result.score > 0.0]
+    return [
+        result
+        for result in results
+        if result.score > 0.0 and not _is_low_relevance_semantic_only_result(result)
+    ]
+
+
+def _is_low_relevance_semantic_only_result(result: SearchResult) -> bool:
+    evidence = result.breakdown.get("evidence") or {}
+    if not evidence.get("semantic_only"):
+        return False
+    return float(result.breakdown.get("semantic_score") or 0.0) < MIN_SEMANTIC_ONLY_RELEVANCE
 
 
 def _has_subjective_intent(intent: SearchIntent) -> bool:
@@ -1245,9 +1678,86 @@ def _has_strong_artist_match(result: SearchResult) -> bool:
     return False
 
 
+def _has_strong_metadata_match(result: SearchResult) -> bool:
+    for match in result.breakdown.get("metadata_matches") or []:
+        if not isinstance(match, dict):
+            continue
+        if match.get("field") in {"artist", "album_artist", "title"} and float(
+            match.get("score") or 0.0
+        ) >= 0.65:
+            return True
+    return False
+
+
+def _has_text_or_metadata_content_match(
+    result: SearchResult,
+    *,
+    require_all: bool,
+) -> bool:
+    breakdown = result.breakdown
+    direct = breakdown.get("direct_content_evidence") or {}
+    if float(breakdown.get("metadata_score") or 0.0) >= 0.65:
+        return True
+    if require_all and bool(direct.get("all")):
+        matched_by_source = direct.get("matched_by_source") or {}
+        return bool(matched_by_source.get("metadata") or matched_by_source.get("profile"))
+    if not require_all and bool(direct.get("any")):
+        matched_by_source = direct.get("matched_by_source") or {}
+        return bool(matched_by_source.get("metadata") or matched_by_source.get("profile"))
+    threshold = 0.99 if require_all else 0.45
+    return float(breakdown.get("text_score") or 0.0) >= threshold
+
+
+def _has_tag_genre_content_evidence(result: SearchResult) -> bool:
+    direct = result.breakdown.get("direct_content_evidence") or {}
+    matched_by_source = direct.get("matched_by_source") or {}
+    return bool(
+        matched_by_source.get("tags")
+        or matched_by_source.get("metadata")
+        or matched_by_source.get("profile")
+    )
+
+
+def _has_mode_content_evidence(result: SearchResult, *, mode: str) -> bool:
+    if mode == "tag_genre":
+        return _has_tag_genre_content_evidence(result)
+    if mode == "metadata_exact":
+        return _has_strong_metadata_match(result) or _has_text_or_metadata_content_match(
+            result,
+            require_all=True,
+        )
+    return _has_non_feature_query_evidence(result)
+
+
 def _has_sort_value(result: SearchResult, intent: SearchIntent) -> bool:
     sort_values = result.breakdown.get("sort_values") or {}
     return any(sort_values.get(sort_spec.field) is not None for sort_spec in intent.sort_by)
+
+
+def _is_sort_only_query(intent: SearchIntent) -> bool:
+    if not intent.sort_by:
+        return False
+    return not _sort_content_terms(intent)
+
+
+def _sort_content_terms(intent: SearchIntent) -> list[str]:
+    return content_query_terms(intent)
+
+
+def _has_non_feature_query_evidence(result: SearchResult) -> bool:
+    breakdown = result.breakdown
+    if any(
+        float(breakdown.get(component) or 0.0) > 0.0
+        for component in (
+            "metadata_score",
+            "tag_score",
+            "context_score",
+            "text_score",
+            "feedback_score",
+        )
+    ):
+        return True
+    return float(breakdown.get("semantic_score") or 0.0) >= 0.45
 
 
 def _apply_explicit_sort(results: list[SearchResult], intent: SearchIntent) -> list[SearchResult]:
@@ -1271,47 +1781,66 @@ def _apply_explicit_sort(results: list[SearchResult], intent: SearchIntent) -> l
 def _weights(
     intent: SearchIntent,
     *,
+    mode: str,
     use_semantic: bool,
     use_feedback: bool,
     use_context: bool,
 ) -> dict[str, float]:
-    has_mood_or_feature_intent = bool(intent.contexts or intent.feature_ranges)
-    if use_semantic:
-        if has_mood_or_feature_intent:
-            weights = {
-                "semantic": 0.42,
-                "metadata": 0.55,
-                "context": 0.26 if use_context else 0.0,
-                "tags": 0.24,
-                "features": 0.18,
-                "text": 0.08,
-            }
-        else:
-            weights = {
-                "semantic": 0.52,
-                "metadata": 0.55,
-                "context": 0.0,
-                "tags": 0.22,
-                "features": 0.16,
-                "text": 0.10,
-            }
-    elif has_mood_or_feature_intent:
+    semantic = 1.0 if use_semantic else 0.0
+    if mode == "metadata_exact":
         weights = {
-            "semantic": 0.0,
-            "metadata": 0.55,
-            "context": 0.32 if use_context else 0.0,
-            "tags": 0.38,
+            "semantic": 0.08 * semantic,
+            "metadata": 0.78,
+            "context": 0.0,
+            "tags": 0.08,
+            "features": 0.0,
+            "text": 0.34,
+        }
+    elif mode == "tag_genre":
+        weights = {
+            "semantic": 0.16 * semantic,
+            "metadata": 0.42,
+            "context": 0.06 if use_context else 0.0,
+            "tags": 0.52,
+            "features": 0.06,
+            "text": 0.30,
+        }
+    elif mode == "feature_sort":
+        weights = {
+            "semantic": 0.10 * semantic,
+            "metadata": 0.40,
+            "context": 0.10 if use_context else 0.0,
+            "tags": 0.30,
             "features": 0.34,
             "text": 0.22,
         }
-    else:
+    elif mode == "feature_filter":
         weights = {
-            "semantic": 0.0,
+            "semantic": 0.18 * semantic,
+            "metadata": 0.42,
+            "context": 0.12 if use_context else 0.0,
+            "tags": 0.38,
+            "features": 0.46,
+            "text": 0.22,
+        }
+    elif mode in {"context_vibe", "occasion", "fallback_semantic"}:
+        weights = {
+            "semantic": 0.42 * semantic,
+            "metadata": 0.42,
+            "context": 0.32 if use_context else 0.0,
+            "tags": 0.32,
+            "features": 0.34,
+            "text": 0.16,
+        }
+    else:
+        has_mood_or_feature_intent = bool(intent.contexts or intent.feature_ranges)
+        weights = {
+            "semantic": 0.36 * semantic if has_mood_or_feature_intent else 0.22 * semantic,
             "metadata": 0.55,
-            "context": 0.0,
-            "tags": 0.34,
-            "features": 0.18,
-            "text": 0.48,
+            "context": 0.24 if use_context and has_mood_or_feature_intent else 0.0,
+            "tags": 0.30,
+            "features": 0.22 if has_mood_or_feature_intent else 0.12,
+            "text": 0.28,
         }
     if use_feedback:
         weights["features"] = max(0.0, weights["features"] - 0.04)

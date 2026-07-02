@@ -81,7 +81,7 @@ def _sort_explanations(breakdown: dict[str, Any]) -> list[str]:
     sort_values = breakdown.get("sort_values") or {}
     output: list[str] = []
     labels = {
-        "tempo_bpm": "BPM",
+        "tempo_bpm": "perceived BPM",
         "energy": "energy",
         "danceability": "danceability",
         "aggression": "aggression",

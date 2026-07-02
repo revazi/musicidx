@@ -1,0 +1,31 @@
+{
+  "matches": [
+    {
+      "id": "exact_duplicate_example",
+      "category": "content_hash",
+      "track_a": "replace-with-track-id-a",
+      "track_b": "replace-with-track-id-b",
+      "expectations": {
+        "decision": "exact_duplicate",
+        "identity_decision": "same",
+        "confidence": "high",
+        "min_confidence_score": 1.0,
+        "must_have_evidence": ["content_hash"],
+        "must_not_decide_identity": false
+      }
+    },
+    {
+      "id": "audio_similarity_only_example",
+      "category": "audio_embedding",
+      "track_a": "replace-with-track-id-a",
+      "track_b": "replace-with-track-id-c",
+      "expectations": {
+        "decision": "sound_similar_only",
+        "identity_decision": "unknown",
+        "must_have_evidence": ["audio_embedding"],
+        "must_have_warnings": ["audio_embedding_similarity_only"],
+        "must_not_decide_identity": true
+      }
+    }
+  ]
+}

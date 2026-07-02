@@ -8,331 +8,39 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from musicidx.analyzer.embeddings import DEFAULT_EMBEDDING_MODEL, EMBEDDING_KIND
+from musicidx.search.taxonomy import load_search_taxonomy
+from musicidx.tempo import perceived_tempo_bpm, tempo_descriptors_from_metadata_and_tags
 
 FEATURE_FIELDS = ["energy", "danceability", "aggression", "brightness", "tempo_bpm"]
 
-DEFAULT_FEATURE_RANGES = {
-    "energy": {
-        "very_low": (0.0, 0.25),
-        "low": (0.0, 0.40),
-        "low_mid": (0.0, 0.65),
-        "mid": (0.25, 0.75),
-        "mid_high": (0.40, 1.0),
-        "high": (0.55, 1.0),
-        "very_high": (0.70, 1.0),
-    },
-    "danceability": {
-        "very_low": (0.0, 0.25),
-        "low": (0.0, 0.40),
-        "low_mid": (0.0, 0.60),
-        "mid": (0.30, 0.75),
-        "mid_high": (0.45, 1.0),
-        "high": (0.60, 1.0),
-        "very_high": (0.75, 1.0),
-    },
-    "aggression": {
-        "very_low": (0.0, 0.20),
-        "low": (0.0, 0.35),
-        "low_mid": (0.0, 0.55),
-        "mid": (0.25, 0.70),
-        "mid_high": (0.40, 1.0),
-        "high": (0.60, 1.0),
-        "very_high": (0.75, 1.0),
-    },
-    "brightness": {
-        "very_low": (0.0, 0.25),
-        "low": (0.0, 0.40),
-        "low_mid": (0.0, 0.60),
-        "mid": (0.25, 0.75),
-        "mid_high": (0.40, 1.0),
-        "high": (0.60, 1.0),
-        "very_high": (0.75, 1.0),
-    },
-    "tempo_bpm": {
-        "very_low": (45.0, 80.0),
-        "low": (50.0, 95.0),
-        "low_mid": (60.0, 115.0),
-        "mid": (75.0, 125.0),
-        "mid_high": (90.0, 150.0),
-        "high": (105.0, 180.0),
-        "very_high": (130.0, 210.0),
-    },
+_SEARCH_TAXONOMY = load_search_taxonomy()
+
+DEFAULT_FEATURE_RANGES: dict[str, dict[str, tuple[float, float]]] = {
+    field_name: dict(levels)
+    for field_name, levels in _SEARCH_TAXONOMY.feature_ranges.items()
 }
 
 CONTEXT_PRIORS: dict[str, dict[str, Any]] = {
-    "chill": {
-        "keywords": ["chill", "relax", "relaxed", "calm", "laid back", "laid-back"],
-        "prefer": ["relaxing", "calm", "ambient", "downtempo", "background", "soft"],
-        "avoid": ["aggressive", "hardcore", "metal", "chaotic", "heavy", "party", "workout"],
-        "features": {"energy": "low", "aggression": "low", "brightness": "low_mid"},
-    },
-    "bar": {
-        "keywords": ["bar", "lounge", "cocktail", "cafe", "restaurant"],
-        "prefer": ["background", "relaxing", "downtempo", "ambient", "jazz", "soul", "lounge"],
-        "avoid": ["aggressive", "hardcore", "metal", "chaotic", "very loud", "party"],
-        "features": {
-            "energy": "low",
-            "aggression": "low",
-            "brightness": "low_mid",
-            "tempo_bpm": "low_mid",
-        },
-    },
-    "background": {
-        "keywords": ["background", "background music", "in the background"],
-        "prefer": ["background", "ambient", "calm", "instrumental", "soft"],
-        "avoid": ["aggressive", "chaotic", "very energetic", "vocal", "speech"],
-        "features": {"energy": "low_mid", "aggression": "low"},
-    },
-    "cooking": {
-        "keywords": ["cooking", "cook", "kitchen"],
-        "prefer": ["cooking", "dinner", "background", "warm", "groovy", "pleasant"],
-        "avoid": ["aggressive", "chaotic", "harsh", "sleep"],
-        "features": {"energy": "mid", "aggression": "low", "danceability": "mid"},
-    },
-    "dinner": {
-        "keywords": ["dinner", "supper", "dining"],
-        "prefer": ["dinner", "warm", "lounge", "background", "soft", "pleasant"],
-        "avoid": ["aggressive", "chaotic", "workout", "hardcore", "very energetic"],
-        "features": {"energy": "low_mid", "aggression": "low", "brightness": "low_mid"},
-    },
-    "no_vocals_background": {
-        "keywords": ["no vocals", "without vocals", "instrumental background", "no voice"],
-        "prefer": ["instrumental", "background", "ambient", "calm", "no vocals"],
-        "avoid": ["vocal", "vocals", "speech", "singer", "rap"],
-        "features": {"energy": "low_mid", "aggression": "low"},
-    },
-    "driving": {
-        "keywords": ["driving", "drive", "road trip", "car music"],
-        "prefer": ["driving", "groove", "energetic", "steady", "upbeat"],
-        "avoid": ["sleep", "meditative", "chaotic"],
-        "features": {"energy": "mid_high", "danceability": "mid_high", "tempo_bpm": "mid_high"},
-    },
-    "shower": {
-        "keywords": ["shower", "morning"],
-        "prefer": ["happy", "upbeat", "energetic", "fun", "pop", "dance", "synth-pop"],
-        "avoid": ["sleep", "sad", "dark", "drone", "meditative"],
-        "features": {"energy": "high", "danceability": "mid_high", "tempo_bpm": "mid_high"},
-    },
-    "melancholic": {
-        "keywords": [
-            "sad",
-            "melancholic",
-            "melancholy",
-            "blue",
-            "heartbreak",
-            "reflective",
-            "introspective",
-        ],
-        "prefer": [
-            "sad",
-            "melancholic",
-            "emotional",
-            "dark",
-            "romantic",
-            "meditative",
-            "reflective",
-            "introspective",
-        ],
-        "avoid": ["party", "very energetic", "aggressive"],
-        "features": {"energy": "low", "brightness": "low", "aggression": "low"},
-    },
-    "party": {
-        "keywords": ["party", "club", "dancefloor", "celebration"],
-        "prefer": ["party", "happy", "dance", "energetic", "house", "disco", "pop"],
-        "avoid": ["sleep", "sad", "meditative"],
-        "features": {"energy": "high", "danceability": "high", "tempo_bpm": "mid_high"},
-    },
-    "wedding": {
-        "keywords": ["wedding", "weddings", "wedding reception", "reception"],
-        "prefer": [
-            "romantic",
-            "love",
-            "happy",
-            "uplifting",
-            "feel good",
-            "warm",
-            "party",
-            "disco",
-            "pop",
-            "soul",
-        ],
-        "avoid": [
-            "aggressive",
-            "hardcore",
-            "hard techno",
-            "dark",
-            "chaotic",
-            "workout",
-            "sleep",
-            "sad",
-        ],
-        "features": {
-            "energy": "mid",
-            "danceability": "mid_high",
-            "aggression": "low",
-            "tempo_bpm": "mid",
-        },
-    },
-    "workout": {
-        "keywords": ["workout", "gym", "run", "running", "exercise", "training"],
-        "prefer": ["energetic", "powerful", "sport", "upbeat", "fast"],
-        "avoid": ["sleep", "soft", "meditative"],
-        "features": {"energy": "very_high", "tempo_bpm": "high", "aggression": "mid_high"},
-    },
-    "focus": {
-        "keywords": ["focus", "study", "work", "coding", "concentrate", "reading"],
-        "prefer": ["background", "ambient", "meditative", "calm", "minimal", "deep"],
-        "avoid": ["aggressive", "party", "very energetic"],
-        "features": {"energy": "low", "aggression": "low", "brightness": "low_mid"},
-    },
-    "sleep": {
-        "keywords": ["sleep", "sleepy", "bed", "night", "nap", "dream"],
-        "prefer": ["relaxing", "calm", "meditative", "ambient", "soft", "slow", "soundscape"],
-        "avoid": ["party", "energetic", "aggressive", "fast"],
-        "features": {
-            "energy": "very_low",
-            "aggression": "very_low",
-            "brightness": "low",
-            "tempo_bpm": "low",
-        },
-    },
-    "ambient": {
-        "keywords": ["ambient", "atmospheric", "spacey", "soundscape"],
-        "prefer": ["ambient", "background", "soundscape", "space", "meditative", "deep"],
-        "avoid": ["aggressive", "hardcore"],
-        "features": {"aggression": "low", "brightness": "low_mid"},
-    },
-    "romantic": {
-        "keywords": ["romantic", "love", "date"],
-        "prefer": ["romantic", "love", "emotional", "soft", "relaxing"],
-        "avoid": ["aggressive", "chaotic"],
-        "features": {"energy": "low_mid", "aggression": "low"},
-    },
-    "happy": {
-        "keywords": ["happy", "feel good", "feel-good", "uplifting", "positive", "upbeat"],
-        "prefer": ["happy", "positive", "uplifting", "fun", "upbeat", "energetic"],
-        "avoid": ["sad", "dark", "melancholic"],
-        "features": {"energy": "mid_high", "danceability": "mid_high"},
-    },
-    "dark": {
-        "keywords": ["dark", "moody", "noir"],
-        "prefer": ["dark", "deep", "emotional", "ambient"],
-        "avoid": ["happy", "party"],
-        "features": {"brightness": "low", "aggression": "low_mid"},
-    },
+    name: {
+        "keywords": list(entry.keywords),
+        "prefer": list(entry.prefer),
+        "avoid": list(entry.avoid),
+        "features": dict(entry.features),
+    }
+    for name, entry in _SEARCH_TAXONOMY.contexts.items()
 }
 
 QUERY_PRIORS: dict[str, dict[str, Any]] = {
-    "energetic": {
-        "keywords": ["energetic", "high energy", "high-energy", "pumped", "pumping"],
-        "prefer": ["energetic", "energy", "upbeat", "powerful", "intense"],
-        "avoid": ["sleep", "sleepy", "quiet", "calm"],
-        "features": {"energy": "high"},
-    },
-    "low_energy": {
-        "keywords": ["low energy", "low-energy", "quiet", "mellow", "soft", "gentle"],
-        "prefer": ["calm", "mellow", "soft", "gentle", "relaxing"],
-        "avoid": ["aggressive", "hardcore", "chaotic", "very energetic"],
-        "features": {"energy": "low_mid", "aggression": "low"},
-    },
-    "danceable": {
-        "keywords": ["dance", "danceable", "dancy", "danciest", "groove", "groovy"],
-        "prefer": ["dance", "danceable", "danceability", "groove", "groovy", "disco", "house"],
-        "avoid": ["drone", "ambient sleep"],
-        "features": {"danceability": "high", "energy": "mid_high"},
-    },
-    "fast": {
-        "keywords": ["fast", "faster", "uptempo", "up-tempo", "high bpm", "high-bpm"],
-        "prefer": ["fast", "uptempo", "energetic"],
-        "avoid": ["slow", "sleepy"],
-        "features": {"tempo_bpm": "high", "energy": "mid_high"},
-    },
-    "slow": {
-        "keywords": ["slow", "slower", "downtempo", "down-tempo", "low bpm", "low-bpm"],
-        "prefer": ["slow", "downtempo", "calm", "relaxing"],
-        "avoid": ["fast", "hardcore"],
-        "features": {"tempo_bpm": "low", "energy": "low_mid"},
-    },
-    "aggressive": {
-        "keywords": ["aggressive", "hard", "heavy", "intense", "brutal", "chaotic"],
-        "prefer": ["aggressive", "hard", "heavy", "intense", "powerful"],
-        "avoid": ["sleep", "soft", "calm"],
-        "features": {"aggression": "high", "energy": "mid_high"},
-    },
-    "not_aggressive": {
-        "keywords": [
-            "not aggressive",
-            "less aggressive",
-            "low aggression",
-            "non aggressive",
-            "non-aggressive",
-        ],
-        "prefer": ["soft", "calm", "gentle", "relaxing", "low aggression"],
-        "avoid": ["aggressive", "hardcore", "heavy", "chaotic"],
-        "features": {"aggression": "low", "energy": "low_mid"},
-    },
-    "bright": {
-        "keywords": ["bright", "brighter", "sparkly", "shimmering", "shiny"],
-        "prefer": ["bright", "sparkly", "uplifting", "shimmering"],
-        "avoid": ["dark", "muddy"],
-        "features": {"brightness": "high"},
-    },
-    "dark": {
-        "keywords": ["dark", "darker", "moody", "noir", "shadowy"],
-        "prefer": ["dark", "moody", "deep", "noir"],
-        "avoid": ["bright", "happy"],
-        "features": {"brightness": "low"},
-    },
-    "instrumental": {
-        "keywords": ["instrumental", "no vocals", "without vocals", "vocal-free", "vocal free"],
-        "prefer": ["instrumental", "background", "ambient", "minimal"],
-        "avoid": ["vocal", "vocals", "singer", "singalong"],
-        "features": {},
-    },
-    "vocal": {
-        "keywords": ["vocal", "vocals", "singing", "singer", "singalong"],
-        "prefer": ["vocal", "vocals", "singing", "singer", "song"],
-        "avoid": ["instrumental"],
-        "features": {},
-    },
-    "lofi": {
-        "keywords": ["lofi", "lo-fi", "lo fi"],
-        "prefer": ["lofi", "lo-fi", "hip hop", "beats", "chill", "background"],
-        "avoid": ["aggressive", "party"],
-        "features": {"energy": "low_mid", "aggression": "low"},
-    },
+    name: {
+        "keywords": list(entry.keywords),
+        "prefer": list(entry.prefer),
+        "avoid": list(entry.avoid),
+        "features": dict(entry.features),
+    }
+    for name, entry in _SEARCH_TAXONOMY.query_priors.items()
 }
 
-QUERY_CONCEPT_STOP_WORDS = {
-    "best",
-    "by",
-    "fastest",
-    "find",
-    "good",
-    "great",
-    "highest",
-    "library",
-    "list",
-    "local",
-    "lowest",
-    "most",
-    "least",
-    "nice",
-    "no",
-    "not",
-    "order",
-    "please",
-    "recommend",
-    "recommendations",
-    "show",
-    "slowest",
-    "some",
-    "sort",
-    "stuff",
-    "top",
-    "vibe",
-    "vibes",
-}
+QUERY_CONCEPT_STOP_WORDS = set(_SEARCH_TAXONOMY.query_concept_stop_words)
 
 
 @dataclass(slots=True)
@@ -408,8 +116,11 @@ class IntentHints:
 class SearchIntent:
     query: str
     limit: int
+    include_missing: bool
     parser: str
     llm_hints: IntentHints | None
+    llm_rejected_hints: IntentHints | None
+    llm_policy: dict[str, Any]
     llm_error: str | None
     contexts: list[str]
     query_terms: list[str]
@@ -428,8 +139,13 @@ class SearchIntent:
         return {
             "query": self.query,
             "limit": self.limit,
+            "include_missing": self.include_missing,
             "parser": self.parser,
             "llm_hints": self.llm_hints.as_dict() if self.llm_hints else None,
+            "llm_rejected_hints": (
+                self.llm_rejected_hints.as_dict() if self.llm_rejected_hints else None
+            ),
+            "llm_policy": self.llm_policy,
             "llm_error": self.llm_error,
             "contexts": self.contexts,
             "query_terms": self.query_terms,
@@ -519,14 +235,25 @@ def parse_intent_dynamic(
     library_profile = build_library_profile(conn, include_missing=include_missing)
     negated_terms = _negated_query_terms(query)
     query_terms = [term for term in normalize_terms(query) if term not in negated_terms]
-    detected_contexts = _unique(_detect_contexts(query) + (llm_hints.contexts if llm_hints else []))
-    parsed_limit = limit or (llm_hints.limit if llm_hints else None) or _parse_limit(query) or 10
+    local_contexts = _detect_contexts(query)
+    parsed_limit = limit or _parse_limit(query) or 10
 
     prefer_concepts: list[str] = []
     avoid_concepts: list[str] = []
     requested_feature_preferences: dict[str, list[str]] = {}
     sort_by = _parse_sort_specs(query)
     prior_prefer, prior_avoid, prior_features = _detect_query_priors(query)
+    accepted_llm_hints, rejected_llm_hints, llm_policy = _apply_llm_advisory_policy(
+        query_terms=query_terms,
+        local_contexts=local_contexts,
+        local_sort_by=sort_by,
+        local_prior_features=prior_features,
+        library_profile=library_profile,
+        llm_hints=llm_hints,
+    )
+    detected_contexts = _unique(
+        local_contexts + (accepted_llm_hints.contexts if accepted_llm_hints else [])
+    )
     prefer_concepts.extend(prior_prefer)
     avoid_concepts.extend(prior_avoid)
     for field_name, levels in prior_features.items():
@@ -541,13 +268,9 @@ def parse_intent_dynamic(
         for field_name, level in prior.get("features", {}).items():
             requested_feature_preferences.setdefault(field_name, []).append(level)
 
-    if llm_hints is not None:
-        prefer_concepts.extend(llm_hints.prefer_tag_concepts)
-        avoid_concepts.extend(llm_hints.avoid_tag_concepts)
-        for field_name, level in llm_hints.feature_preferences.items():
-            if field_name in DEFAULT_FEATURE_RANGES and level in DEFAULT_FEATURE_RANGES[field_name]:
-                requested_feature_preferences.setdefault(field_name, []).append(level)
-        sort_by = _merge_sort_specs(sort_by, llm_hints.sort_by)
+    if accepted_llm_hints is not None:
+        prefer_concepts.extend(accepted_llm_hints.prefer_tag_concepts)
+        avoid_concepts.extend(accepted_llm_hints.avoid_tag_concepts)
 
     for sort_spec in sort_by:
         if sort_spec.field in DEFAULT_FEATURE_RANGES:
@@ -585,8 +308,11 @@ def parse_intent_dynamic(
     return SearchIntent(
         query=query,
         limit=max(1, min(100, parsed_limit)),
+        include_missing=include_missing,
         parser=parser,
-        llm_hints=llm_hints,
+        llm_hints=accepted_llm_hints,
+        llm_rejected_hints=rejected_llm_hints,
+        llm_policy=llm_policy,
         llm_error=llm_error,
         contexts=detected_contexts,
         query_terms=query_terms,
@@ -601,6 +327,108 @@ def parse_intent_dynamic(
         diversity={"max_tracks_per_artist": 2},
         library_profile=library_profile,
     )
+
+
+def _apply_llm_advisory_policy(
+    *,
+    query_terms: list[str],
+    local_contexts: list[str],
+    local_sort_by: list[SortSpec],
+    local_prior_features: dict[str, list[str]],
+    library_profile: LibraryProfile,
+    llm_hints: IntentHints | None,
+) -> tuple[IntentHints | None, IntentHints | None, dict[str, Any]]:
+    """Accept only advisory LLM context/tag expansion.
+
+    The deterministic parser owns objective intent: exact terms, limits, feature ranges,
+    and sort directives. LLM hints can add contextual/tag concepts only for vague or
+    contextual queries.
+    """
+    if llm_hints is None:
+        return None, None, {"used": False, "role": "none"}
+
+    objective_reason = _objective_llm_ignore_reason(
+        query_terms=query_terms,
+        local_contexts=local_contexts,
+        local_sort_by=local_sort_by,
+        local_prior_features=local_prior_features,
+        library_profile=library_profile,
+    )
+    if objective_reason:
+        return (
+            None,
+            llm_hints,
+            {
+                "used": True,
+                "role": "ignored_for_objective_query",
+                "accepted_fields": [],
+                "rejected_fields": _non_empty_hint_fields(llm_hints),
+                "ignored_because": objective_reason,
+            },
+        )
+
+    accepted = IntentHints(
+        contexts=llm_hints.contexts,
+        prefer_tag_concepts=llm_hints.prefer_tag_concepts,
+        avoid_tag_concepts=llm_hints.avoid_tag_concepts,
+        notes=llm_hints.notes,
+    )
+    rejected = IntentHints(
+        feature_preferences=llm_hints.feature_preferences,
+        sort_by=llm_hints.sort_by,
+        limit=llm_hints.limit,
+    )
+    accepted_fields = _non_empty_hint_fields(accepted)
+    rejected_fields = _non_empty_hint_fields(rejected)
+    return (
+        accepted if accepted_fields else None,
+        rejected if rejected_fields else None,
+        {
+            "used": True,
+            "role": "advisory_context_expansion",
+            "accepted_fields": accepted_fields,
+            "rejected_fields": rejected_fields,
+            "ignored_because": None,
+        },
+    )
+
+
+def _objective_llm_ignore_reason(
+    *,
+    query_terms: list[str],
+    local_contexts: list[str],
+    local_sort_by: list[SortSpec],
+    local_prior_features: dict[str, list[str]],
+    library_profile: LibraryProfile,
+) -> str | None:
+    content_terms = [term for term in query_terms if term not in QUERY_CONCEPT_STOP_WORDS]
+    direct_tag_matches = match_library_tags(content_terms, library_profile.tag_stats)
+    if local_sort_by:
+        return "explicit_sort"
+    if direct_tag_matches and len(content_terms) <= 3:
+        return "direct_library_tag_or_genre"
+    if local_prior_features and not local_contexts:
+        return "explicit_feature_query"
+    if content_terms and not local_contexts:
+        return "metadata_or_text_query"
+    return None
+
+
+def _non_empty_hint_fields(hints: IntentHints) -> list[str]:
+    fields: list[str] = []
+    if hints.contexts:
+        fields.append("contexts")
+    if hints.prefer_tag_concepts:
+        fields.append("prefer_tag_concepts")
+    if hints.avoid_tag_concepts:
+        fields.append("avoid_tag_concepts")
+    if hints.feature_preferences:
+        fields.append("feature_preferences")
+    if hints.sort_by:
+        fields.append("sort_by")
+    if hints.limit is not None:
+        fields.append("limit")
+    return fields
 
 
 def _select_available_semantic_model(
@@ -625,30 +453,77 @@ def _parse_sort_specs(query: str) -> list[SortSpec]:
     def add(field: str, direction: str, source: str) -> None:
         specs.append(SortSpec(field=field, direction=direction, source=source))
 
-    high_tempo_pattern = r"\b(highest|max(?:imum)?|fastest|quickest|highest\s+bpm|most\s+bpm)\b"
+    high_tempo_pattern = (
+        r"\b("
+        r"highest|max(?:imum)?|fastest|quickest|"
+        r"highest\s+(?:bpm|tempo)|most\s+(?:bpm|tempo)|"
+        r"high\s+(?:bpm|tempo)|fast\s+(?:bpm|tempo)"
+        r")\b"
+    )
     if re.search(high_tempo_pattern, normalized):
         if re.search(r"\b(bpm|tempo|fastest|quickest)\b", normalized):
             add("tempo_bpm", "desc", "natural_language")
-    if re.search(r"\b(lowest|min(?:imum)?|slowest|least\s+bpm)\b", normalized):
+    low_tempo_pattern = (
+        r"\b("
+        r"lowest|min(?:imum)?|slowest|"
+        r"least\s+(?:bpm|tempo)|low\s+(?:bpm|tempo)|slow\s+(?:bpm|tempo)"
+        r")\b"
+    )
+    if re.search(low_tempo_pattern, normalized):
         if re.search(r"\b(bpm|tempo|slowest)\b", normalized):
             add("tempo_bpm", "asc", "natural_language")
 
     feature_patterns = {
         "energy": {
-            "desc": [r"\bmost energetic\b", r"\bhighest energy\b", r"\bmax(?:imum)? energy\b"],
-            "asc": [r"\bleast energetic\b", r"\blowest energy\b", r"\bminimum energy\b"],
+            "desc": [
+                r"\bmost energetic\b",
+                r"\bhighest energy\b",
+                r"\bhigh energy\b",
+                r"\bmax(?:imum)? energy\b",
+            ],
+            "asc": [
+                r"\bleast energetic\b",
+                r"\blowest energy\b",
+                r"\blow energy\b",
+                r"\bminimum energy\b",
+            ],
         },
         "danceability": {
-            "desc": [r"\bmost danceable\b", r"\bdanciest\b", r"\bhighest danceability\b"],
-            "asc": [r"\bleast danceable\b", r"\blowest danceability\b"],
+            "desc": [
+                r"\bmost danceable\b",
+                r"\bdanciest\b",
+                r"\bhighest danceability\b",
+                r"\bhigh danceability\b",
+            ],
+            "asc": [r"\bleast danceable\b", r"\blowest danceability\b", r"\blow danceability\b"],
         },
         "aggression": {
-            "desc": [r"\bmost aggressive\b", r"\bhardest\b", r"\bhighest aggression\b"],
-            "asc": [r"\bleast aggressive\b", r"\bsoftest\b", r"\blowest aggression\b"],
+            "desc": [
+                r"\bmost aggressive\b",
+                r"\bhardest\b",
+                r"\bhighest aggression\b",
+                r"\bhigh aggression\b",
+            ],
+            "asc": [
+                r"\bleast aggressive\b",
+                r"\bsoftest\b",
+                r"\blowest aggression\b",
+                r"\blow aggression\b",
+            ],
         },
         "brightness": {
-            "desc": [r"\bbrightest\b", r"\bhighest brightness\b", r"\bmost bright\b"],
-            "asc": [r"\bdarkest\b", r"\blowest brightness\b", r"\bleast bright\b"],
+            "desc": [
+                r"\bbrightest\b",
+                r"\bhighest brightness\b",
+                r"\bhigh brightness\b",
+                r"\bmost bright\b",
+            ],
+            "asc": [
+                r"\bdarkest\b",
+                r"\blowest brightness\b",
+                r"\blow brightness\b",
+                r"\bleast bright\b",
+            ],
         },
     }
     for field_name, directions in feature_patterns.items():
@@ -815,7 +690,6 @@ def _feature_percentiles(
         "danceability": "af.danceability",
         "aggression": "af.aggression",
         "brightness": "af.brightness",
-        "tempo_bpm": "af.bpm",
     }
     output: dict[str, dict[str, float]] = {}
     for field_name, sql_expr in field_sql.items():
@@ -843,6 +717,61 @@ def _feature_percentiles(
             "p70": round(_quantile(values, 0.70), 6),
             "p75": round(_quantile(values, 0.75), 6),
             "max": round(max(values), 6),
+        }
+
+    tempo_rows = conn.execute(
+        f"""
+        SELECT
+            af.bpm AS value,
+            tr.title,
+            tr.artist,
+            tr.album,
+            tr.genre,
+            GROUP_CONCAT(tt.tag) AS tags,
+            GROUP_CONCAT(tt.source) AS sources
+        FROM audio_features af
+        JOIN tracks tr ON tr.id = af.track_id
+        LEFT JOIN track_tags tt ON tt.track_id = tr.id
+        WHERE af.bpm IS NOT NULL
+          {missing_clause}
+        GROUP BY tr.id
+        ORDER BY value
+        """
+    ).fetchall()
+    tempo_values = []
+    for row in tempo_rows:
+        descriptors = tempo_descriptors_from_metadata_and_tags(
+            {
+                "title": row["title"],
+                "artist": row["artist"],
+                "album": row["album"],
+                "genre": row["genre"],
+            },
+            [
+                {"tag": tag, "source": source}
+                for tag, source in zip(
+                    str(row["tags"] or "").split(","),
+                    str(row["sources"] or "").split(","),
+                    strict=False,
+                )
+                if tag or source
+            ],
+        )
+        value = perceived_tempo_bpm(row["value"], descriptors=descriptors)
+        if value is not None:
+            tempo_values.append(value)
+    if tempo_values:
+        output["tempo_bpm"] = {
+            "count": float(len(tempo_values)),
+            "min": round(min(tempo_values), 6),
+            "p25": round(_quantile(tempo_values, 0.25), 6),
+            "p35": round(_quantile(tempo_values, 0.35), 6),
+            "p45": round(_quantile(tempo_values, 0.45), 6),
+            "p55": round(_quantile(tempo_values, 0.55), 6),
+            "p65": round(_quantile(tempo_values, 0.65), 6),
+            "p70": round(_quantile(tempo_values, 0.70), 6),
+            "p75": round(_quantile(tempo_values, 0.75), 6),
+            "max": round(max(tempo_values), 6),
         }
     return output
 
@@ -886,6 +815,11 @@ def _keyword_present(query: str, keyword: str) -> bool:
     normalized_keyword = keyword.lower().replace("-", " ")
     escaped = re.escape(normalized_keyword).replace(r"\ ", r"\s+")
     return re.search(rf"\b{escaped}\b", normalized_query) is not None
+
+
+def negated_query_terms(query: str) -> list[str]:
+    """Return normalized query terms that are explicitly negated."""
+    return sorted(_negated_query_terms(query))
 
 
 def _negated_query_terms(query: str) -> set[str]:

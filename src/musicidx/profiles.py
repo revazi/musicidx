@@ -18,6 +18,7 @@ from musicidx.profile_documents import (
 from musicidx.profile_documents import (
     profile_json_text as serialize_profile_json,
 )
+from musicidx.tempo import perceived_tempo_bpm, tempo_descriptors_from_metadata_and_tags
 
 
 @dataclass(slots=True)
@@ -84,17 +85,6 @@ def rebuild_track_profile(
     )
     base_text, _base_json = build_track_profile(metadata, Path(track["path"]))
 
-    audio_features: dict[str, Any] | None = None
-    audio_row = conn.execute(
-        "SELECT * FROM audio_features WHERE track_id = ?",
-        (track_id,),
-    ).fetchone()
-    if audio_row is not None:
-        audio_text = describe_audio_feature_row(audio_row)
-        if audio_text:
-            base_text = f"{base_text} Audio: {audio_text}".strip()
-        audio_features = _audio_features_dict(audio_row)
-
     tag_rows = conn.execute(
         """
         SELECT source, tag, score
@@ -104,20 +94,32 @@ def rebuild_track_profile(
         """,
         (track_id,),
     ).fetchall()
-    tags: list[dict[str, Any]] = []
+    tags: list[dict[str, Any]] = [
+        {
+            "source": row["source"],
+            "tag": row["tag"],
+            "score": float(row["score"]),
+        }
+        for row in tag_rows
+    ]
+    tempo_descriptors = tempo_descriptors_from_metadata_and_tags(metadata.as_dict(), tags)
+
+    audio_features: dict[str, Any] | None = None
+    audio_row = conn.execute(
+        "SELECT * FROM audio_features WHERE track_id = ?",
+        (track_id,),
+    ).fetchone()
+    if audio_row is not None:
+        audio_text = describe_audio_feature_row(audio_row, tempo_descriptors=tempo_descriptors)
+        if audio_text:
+            base_text = f"{base_text} Audio: {audio_text}".strip()
+        audio_features = _audio_features_dict(audio_row)
+
     if tag_rows:
         tag_text = ", ".join(
             f"{row['tag']} {float(row['score']):.2f}" for row in tag_rows[:20]
         )
         base_text = f"{base_text} Tags: {tag_text}.".strip()
-        tags = [
-            {
-                "source": row["source"],
-                "tag": row["tag"],
-                "score": float(row["score"]),
-            }
-            for row in tag_rows
-        ]
 
     context_fit = _context_fit(conn, track_id)
 
@@ -191,13 +193,19 @@ def rebuild_track_profile(
     return profile_text, profile_json
 
 
-def describe_audio_feature_row(row: sqlite3.Row) -> str:
+def describe_audio_feature_row(
+    row: sqlite3.Row,
+    *,
+    tempo_descriptors: list[str] | None = None,
+) -> str:
     """Create human-readable audio descriptors from an audio_features row."""
     parts: list[str] = []
     if row["energy"] is not None:
         parts.append(f"{_band(float(row['energy']))} energy")
     if row["bpm"] is not None:
-        parts.append(f"tempo around {float(row['bpm']):.0f} BPM")
+        bpm = perceived_tempo_bpm(row["bpm"], descriptors=tempo_descriptors)
+        if bpm is not None:
+            parts.append(f"tempo around {bpm:.0f} BPM")
     if row["brightness"] is not None:
         parts.append(f"{_band(float(row['brightness']))} brightness")
     if row["danceability"] is not None:

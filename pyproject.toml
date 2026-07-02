@@ -17,9 +17,15 @@ classifiers = [
 dependencies = [
   "typer>=0.12",
   "rich>=13.0",
-  "numpy>=1.24",
+  "PyYAML>=6.0",
+  "numpy>=1.26,<2",
+  "pyacoustid>=1.3",
   "soundfile>=0.12",
   "librosa>=0.10",
+  # Latest numba/llvmlite releases no longer provide macOS Intel wheels.
+  # Pin Intel Macs to the newest pair that still has cp311 macosx_x86_64 wheels.
+  "numba==0.62.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "llvmlite==0.45.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.optional-dependencies]
@@ -28,10 +34,15 @@ dev = [
   "ruff>=0.4",
 ]
 ml = [
-  "essentia-tensorflow>=2.1b6.dev1389,<2.2",
+  # Newer 2.1b6.dev1438 wheels are currently CPython 3.14-only on PyPI.
+  # Keep the ML extra pinned to the CPython 3.11-compatible build used for packaging.
+  "essentia-tensorflow==2.1b6.dev1389",
 ]
 semantic = [
-  "sentence-transformers>=3.0",
+  # Keep the semantic stack compatible with macOS Intel, where PyPI torch wheels stop at 2.2.2.
+  "sentence-transformers>=3.0,<4",
+  "transformers>=4.41,<5",
+  "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.scripts]

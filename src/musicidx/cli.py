@@ -36,6 +36,7 @@ from musicidx.analyzer.essentia_models import (
     model_manifest_status,
     process_tags,
 )
+from musicidx.browse import browse_library
 from musicidx.config import (
     DB_PATH_ENV_VAR,
     DEFAULT_DB_FILENAME,
@@ -96,7 +97,15 @@ from musicidx.search.llm import (
     llm_hint_warnings,
     parse_intent_llm,
 )
+from musicidx.search.match_evaluation import (
+    aggregate_match_eval_results,
+    evaluate_match_case,
+    load_match_eval_cases,
+)
+from musicidx.search.matching import compare_tracks, find_track_matches
+from musicidx.search.plan import build_search_plan
 from musicidx.search.ranker import search_music
+from musicidx.search.taxonomy import load_search_taxonomy
 
 app = typer.Typer(help="Local-first music library index CLI.")
 models_app = typer.Typer(help="Manage local ML model files.")
@@ -127,6 +136,8 @@ DryRunOption = Annotated[
 ]
 TrackIdOption = Annotated[str | None, typer.Option("--track-id", help="Process one track ID.")]
 RequiredTrackIdOption = Annotated[str, typer.Option("--track-id", help="Track ID to show.")]
+TrackAOption = Annotated[str, typer.Option("--track-a", help="First track ID to compare.")]
+TrackBOption = Annotated[str, typer.Option("--track-b", help="Second track ID to compare.")]
 MissingOnlyOption = Annotated[
     bool,
     typer.Option("--missing-only", help="Only process tracks without stored metadata/profile."),
@@ -141,9 +152,14 @@ FingerprintMissingOnlyOption = Annotated[
 ]
 SearchQueryArg = Annotated[str, typer.Argument(help="Full-text query to search for.")]
 EvalFileArg = Annotated[Path, typer.Argument(help="JSON eval query file.")]
+MatchEvalFileArg = Annotated[Path, typer.Argument(help="JSON match eval file.")]
 LimitOption = Annotated[
     int,
     typer.Option("--limit", min=1, max=100, help="Maximum number of results."),
+]
+BrowseLimitOption = Annotated[
+    int,
+    typer.Option("--limit", min=1, max=500, help="Maximum number of direct track rows to return."),
 ]
 OptionalLimitOption = Annotated[
     int | None,
@@ -159,6 +175,13 @@ DurationToleranceOption = Annotated[
         "--duration-tolerance",
         min=0.0,
         help="Duration tolerance in seconds for duplicate grouping.",
+    ),
+]
+AgainstLibraryOption = Annotated[
+    bool,
+    typer.Option(
+        "--against-library",
+        help="Explicitly match the track against indexed library candidates (default behavior).",
     ),
 ]
 DuplicatesIncludeMissingOption = Annotated[
@@ -743,6 +766,89 @@ def index_health_command(
             console.print(f"- {action}")
 
 
+@app.command("browse")
+def browse_command(
+    db: DbOption = None,
+    path: Annotated[
+        Path | None,
+        typer.Option("--path", help="Indexed folder/root to browse or search under."),
+    ] = None,
+    query: Annotated[
+        str | None,
+        typer.Option("--query", help="Simple keyword search across title/artist/album/genre/path."),
+    ] = None,
+    sort: Annotated[
+        str,
+        typer.Option(
+            "--sort",
+            help="Sort by artist, title, album, genre, bpm, duration, path, or indexed_at.",
+        ),
+    ] = "artist",
+    desc: Annotated[bool, typer.Option("--desc", help="Sort descending.")] = False,
+    offset: Annotated[
+        int,
+        typer.Option("--offset", min=0, help="Track result offset for pagination."),
+    ] = 0,
+    include_missing: IncludeMissingOption = False,
+    limit: BrowseLimitOption = 200,
+    json_output: JsonOption = False,
+) -> None:
+    """Browse or simple-search indexed roots/folders/tracks from SQLite."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        payload = {
+            "db_path": str(db_path),
+            **browse_library(
+                conn,
+                path=path,
+                query=query,
+                sort=sort,
+                direction="desc" if desc else "asc",
+                include_missing=include_missing,
+                limit=limit,
+                offset=offset,
+            ),
+        }
+    finally:
+        conn.close()
+
+    if json_output:
+        _print_json(payload)
+        return
+
+    heading = "Library search" if payload.get("mode") == "search" else "Library browser"
+    console.print(f"[bold]{heading}:[/bold] {payload.get('cwd') or 'no indexed roots'}")
+    if payload.get("query"):
+        console.print(
+            f"Query: {payload['query']} · sort: {payload['sort']} "
+            f"{payload['sort_direction']}"
+        )
+    if payload.get("warning"):
+        console.print(f"[yellow]{payload['warning']}[/yellow]")
+    if payload["roots"]:
+        console.print("[bold]Roots:[/bold]")
+        for root in payload["roots"]:
+            console.print(f"- {root['path']} ({root['track_count']} tracks)")
+    if payload["folders"]:
+        console.print("[bold]Folders:[/bold]")
+        for folder in payload["folders"]:
+            console.print(f"- {folder['name']} ({folder['track_count']} tracks)")
+    if payload["tracks"]:
+        table = Table(title="Tracks")
+        table.add_column("Artist")
+        table.add_column("Title")
+        table.add_column("Path")
+        for track in payload["tracks"]:
+            table.add_row(
+                track.get("artist") or "",
+                track.get("title") or "",
+                track.get("path") or "",
+            )
+        console.print(table)
+
+
 @app.command("failed")
 def failed_command(
     db: DbOption = None,
@@ -1283,6 +1389,77 @@ def duplicates_command(
         console.print(table)
 
 
+@app.command("compare-tracks")
+def compare_tracks_command(
+    track_a: TrackAOption,
+    track_b: TrackBOption,
+    db: DbOption = None,
+    duration_tolerance: DurationToleranceOption = 3.0,
+    json_output: JsonOption = False,
+) -> None:
+    """Compare two indexed tracks with deterministic identity evidence."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        report = compare_tracks(
+            conn,
+            track_a,
+            track_b,
+            duration_tolerance_sec=duration_tolerance,
+        )
+    finally:
+        conn.close()
+
+    payload = {"db_path": str(db_path), "report": report.as_dict()}
+    if json_output:
+        _print_json(payload)
+        return
+    _print_match_report(report.as_dict())
+
+
+@app.command("match-track")
+def match_track_command(
+    track_id: RequiredTrackIdOption,
+    db: DbOption = None,
+    include_missing: DuplicatesIncludeMissingOption = True,
+    against_library: AgainstLibraryOption = False,
+    duration_tolerance: DurationToleranceOption = 3.0,
+    limit: LimitOption = 10,
+    json_output: JsonOption = False,
+) -> None:
+    """Find deterministic duplicate/same-recording candidates for one track."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        reports = find_track_matches(
+            conn,
+            track_id,
+            limit=limit,
+            include_missing=include_missing,
+            duration_tolerance_sec=duration_tolerance,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "db_path": str(db_path),
+        "track_id": track_id,
+        "against_library": True,
+        "count": len(reports),
+        "reports": [report.as_dict() for report in reports],
+    }
+    if json_output:
+        _print_json(payload)
+        return
+    if not reports:
+        console.print("[green]No deterministic match candidates found.[/green]")
+        return
+    for report in reports:
+        _print_match_report(report.as_dict())
+
+
 @app.command("analyze-basic")
 def analyze_basic_command(
     db: DbOption = None,
@@ -1670,6 +1847,85 @@ def parse_command(
     _print_json(payload)
 
 
+@app.command("search-taxonomy")
+def search_taxonomy_command(json_output: JsonOption = False) -> None:
+    """Inspect the declarative search taxonomy used by the parser."""
+    taxonomy = load_search_taxonomy()
+    taxonomy_payload = taxonomy.as_dict()
+    payload = {
+        "schema_version": taxonomy.schema_version,
+        "counts": {
+            "feature_fields": len(taxonomy.feature_ranges),
+            "contexts": len(taxonomy.contexts),
+            "query_priors": len(taxonomy.query_priors),
+            "occasion_contexts": len(taxonomy.occasion_contexts),
+            "query_concept_stop_words": len(taxonomy.query_concept_stop_words),
+        },
+        "taxonomy": taxonomy_payload,
+    }
+    if json_output:
+        _print_json(payload)
+        return
+
+    table = Table(title="Search taxonomy")
+    table.add_column("Section")
+    table.add_column("Count", justify="right")
+    for key, value in payload["counts"].items():
+        table.add_row(key.replace("_", " "), str(value))
+    console.print(table)
+    console.print(
+        "[dim]Use --json to inspect contexts, query priors, feature ranges, and policy text.[/dim]"
+    )
+
+
+@app.command("search-plan")
+def search_plan_command(
+    query: SearchQueryArg,
+    db: DbOption = None,
+    limit: OptionalLimitOption = None,
+    semantic_model: SemanticModelOption = DEFAULT_EMBEDDING_MODEL,
+    include_missing: IncludeMissingOption = False,
+    use_llm: UseLlmOption = False,
+    llm_provider: LlmProviderOption = "gemini",
+    llm_model: LlmModelOption = None,
+    llm_timeout: LlmTimeoutOption = 30.0,
+    json_output: JsonOption = False,
+) -> None:
+    """Show the ranking-oriented search plan before executing search."""
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        llm_hints, parser, llm_error = _maybe_parse_with_llm(
+            conn,
+            query,
+            use_llm=use_llm,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            timeout_sec=llm_timeout,
+            include_missing=include_missing,
+        )
+        intent = parse_intent_dynamic(
+            query,
+            conn,
+            limit=limit,
+            include_missing=include_missing,
+            semantic_model=semantic_model,
+            llm_hints=llm_hints,
+            parser=parser,
+            llm_error=llm_error,
+        )
+        plan = build_search_plan(intent)
+    finally:
+        conn.close()
+
+    payload = {"db_path": str(db_path), "plan": plan}
+    if json_output:
+        _print_json(payload)
+        return
+    _print_search_plan(plan)
+
+
 @app.command("search")
 def search_command(
     query: SearchQueryArg,
@@ -1810,6 +2066,12 @@ def eval_command(
         return
 
     summary = payload["summary"]
+    structured = summary.get("avg_structured_pass_rate")
+    structured_text = (
+        f" structured={structured:.3f}"
+        if isinstance(structured, (int, float))
+        else ""
+    )
     console.print(
         "[bold]Eval summary:[/bold] "
         f"queries={summary['query_count']} "
@@ -1817,6 +2079,7 @@ def eval_command(
         f"avoid={summary['avg_avoid_rate']:.3f} "
         f"coverage={summary['avg_tag_coverage']:.3f} "
         f"diversity={summary['avg_diversity_score']:.3f}"
+        f"{structured_text}"
     )
     table = Table(title="Search-quality eval")
     table.add_column("ID")
@@ -1825,11 +2088,13 @@ def eval_command(
     table.add_column("Avoid", justify="right")
     table.add_column("Coverage", justify="right")
     table.add_column("Diversity", justify="right")
+    table.add_column("Structured", justify="right")
     table.add_column("Top result")
     for result in results:
         top = result["top_results"][0] if result["top_results"] else {}
         title = top.get("title") or top.get("track_id") or ""
         artist = top.get("artist") or ""
+        structured_rate = result.get("structured_pass_rate")
         table.add_row(
             result["id"],
             result["query"],
@@ -1837,7 +2102,77 @@ def eval_command(
             f"{result['avoid_rate']:.3f}",
             f"{result['tag_coverage']:.3f}",
             f"{result['diversity_score']:.3f}",
+            f"{structured_rate:.3f}" if isinstance(structured_rate, (int, float)) else "-",
             " - ".join(part for part in [artist, title] if part),
+        )
+    console.print(table)
+
+
+@app.command("eval-matches")
+def eval_matches_command(
+    eval_file: MatchEvalFileArg,
+    db: DbOption = None,
+    duration_tolerance: DurationToleranceOption = 3.0,
+    json_output: JsonOption = False,
+) -> None:
+    """Run a repeatable MatchReport regression eval set."""
+    try:
+        eval_cases = load_match_eval_cases(eval_file)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    db_path = resolve_db_path(db)
+    conn = connect_db(db_path)
+    try:
+        init_db(conn)
+        results = [
+            evaluate_match_case(
+                conn,
+                eval_case,
+                duration_tolerance_sec=duration_tolerance,
+            )
+            for eval_case in eval_cases
+        ]
+        payload = {
+            "db_path": str(db_path),
+            "eval_file": str(eval_file),
+            "summary": aggregate_match_eval_results(results),
+            "results": results,
+        }
+    finally:
+        conn.close()
+
+    if json_output:
+        _print_json(payload)
+        return
+
+    summary = payload["summary"]
+    structured = summary.get("avg_structured_pass_rate")
+    structured_text = (
+        f" structured={structured:.3f}"
+        if isinstance(structured, (int, float))
+        else ""
+    )
+    console.print(
+        "[bold]Match eval summary:[/bold] "
+        f"matches={summary['match_count']}"
+        f"{structured_text}"
+    )
+    table = Table(title="MatchReport eval")
+    table.add_column("ID")
+    table.add_column("Decision")
+    table.add_column("Identity")
+    table.add_column("Confidence")
+    table.add_column("Structured", justify="right")
+    for result in results:
+        structured_rate = result.get("structured_pass_rate")
+        table.add_row(
+            result["id"],
+            result["decision"],
+            result["identity_decision"],
+            result["confidence"],
+            f"{structured_rate:.3f}" if isinstance(structured_rate, (int, float)) else "-",
         )
     console.print(table)
 
@@ -2227,6 +2562,8 @@ def _concise_result(result: Any) -> dict[str, Any]:
         "evidence": breakdown.get("evidence"),
         "warnings": breakdown.get("confidence_warnings") or [],
         "saved_feedback_rating": _rating_label(breakdown.get("saved_feedback_rating")),
+        "rank_reason": breakdown.get("rank_reason"),
+        "candidate_evidence": breakdown.get("candidate_evidence"),
         "why": result.explanation,
         "scores": {
             "semantic": round(float(breakdown.get("semantic_score", 0.0)), 6),
@@ -2263,6 +2600,92 @@ def _coverage_text(payload: dict[str, Any]) -> str:
     tracks = int(payload.get("tracks", 0) or 0)
     missing = int(payload.get("missing", 0) or 0)
     return f"{tracks} / {tracks + missing} active"
+
+
+def _print_match_report(report: dict[str, Any]) -> None:
+    left = report["track_a"]
+    right = report["track_b"]
+    title = (
+        f"Match report: {left.get('artist') or ''} — {left.get('title') or left['track_id']}"
+        f" ↔ {right.get('artist') or ''} — {right.get('title') or right['track_id']}"
+    )
+    table = Table(title=title)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("decision", report["decision"])
+    table.add_row("identity", report["identity_decision"])
+    table.add_row(
+        "identity confidence",
+        f"{report['confidence']} ({report['confidence_score']:.2f})",
+    )
+    table.add_row("candidate kind", str(report.get("candidate_kind") or "unknown"))
+    table.add_row("candidate strength", str(report.get("candidate_strength") or "weak"))
+    table.add_row("candidate summary", str(report.get("candidate_summary") or ""))
+    table.add_row("candidate score", f"{float(report.get('candidate_score') or 0.0):.2f}")
+    table.add_row("candidate reasons", "; ".join(report.get("candidate_reasons") or []))
+    table.add_row("identity reasons", "; ".join(report.get("reasons") or []))
+    if report.get("warnings"):
+        table.add_row("warnings", "; ".join(report["warnings"]))
+    console.print(table)
+
+    evidence_table = Table(title="Evidence")
+    evidence_table.add_column("Source")
+    evidence_table.add_column("Role")
+    evidence_table.add_column("Status")
+    evidence_table.add_column("Score", justify="right")
+    evidence_table.add_column("Decisive")
+    for item in report.get("evidence") or []:
+        evidence_table.add_row(
+            item["source"],
+            item["role"],
+            item["status"],
+            f"{float(item.get('score') or 0.0):.2f}",
+            "yes" if item.get("decisive") else "no",
+        )
+    console.print(evidence_table)
+
+
+def _print_search_plan(plan: dict[str, Any]) -> None:
+    console.print(f"[bold]Search plan:[/bold] {plan['query']}")
+    console.print(f"Mode: [cyan]{plan['mode']}[/cyan]")
+    console.print(f"Parser: {plan['parser']}")
+    semantic = plan.get("semantic") or {}
+    console.print(
+        "Semantic: "
+        f"{semantic.get('role', 'unknown')} "
+        f"({'enabled' if semantic.get('enabled') else 'disabled'})"
+    )
+    terms = plan.get("terms") or {}
+    if terms.get("content"):
+        console.print("Content terms: " + ", ".join(terms["content"]))
+    if terms.get("directives"):
+        console.print("Directive terms: " + ", ".join(terms["directives"]))
+    for section in ("must", "should", "avoid", "sort"):
+        rows = plan.get(section) or []
+        if not rows:
+            continue
+        table = Table(title=section.upper())
+        table.add_column("Type")
+        table.add_column("Detail")
+        for row in rows[:20]:
+            if section == "sort":
+                table.add_row(row.get("field", ""), row.get("direction", ""))
+                continue
+            row_type = str(row.get("type") or "")
+            detail = str(
+                row.get("concept")
+                or row.get("tag")
+                or row.get("label")
+                or row.get("field")
+                or ""
+            )
+            if "low" in row and "high" in row:
+                detail = f"{detail}: {row['low']}–{row['high']}"
+            table.add_row(row_type, detail)
+        console.print(table)
+    warnings = plan.get("warnings") or []
+    if warnings:
+        console.print("Warnings: " + ", ".join(warnings))
 
 
 def _rating_label(value: Any) -> str | None:
