@@ -55,172 +55,214 @@ const LIBRARY_SORT_OPTIONS = [
   { value: "path:asc", label: "File path A→Z" },
 ] as const;
 
-export function LibraryBrowsePanel({
-  payload,
-  expanded,
-  busy,
-  matchPayloads,
-  matchingTrackId,
-  debugMode,
-  query,
-  sort,
-  sortDirection,
-  onQueryChange,
-  onSortChange,
-  onSortDirectionChange,
-  onToggle,
-  onLoad,
-  onOpenPath,
-  onSubmitSearch,
-  onClearSearch,
-  onPage,
-  onPlay,
-  onReveal,
-  onMatch,
-  renderMatches,
-}: LibraryBrowsePanelProps) {
-  const tracks = payload?.tracks ?? [];
+export function LibraryBrowsePanel(props: LibraryBrowsePanelProps) {
   return (
     <div className="grid gap-3 rounded-lg border bg-background/60 p-3 text-sm">
-      <LibraryBrowseHeader
-        payload={payload}
-        expanded={expanded}
-        busy={busy}
-        visibleTrackCount={tracks.length}
-        onToggle={onToggle}
-        onLoad={onLoad}
-      />
-      {expanded ? (
-        <LibraryBrowseBody
-          payload={payload}
-          busy={busy}
-          query={query}
-          sort={sort}
-          sortDirection={sortDirection}
-          onQueryChange={onQueryChange}
-          onSortChange={onSortChange}
-          onSortDirectionChange={onSortDirectionChange}
-          onSubmitSearch={onSubmitSearch}
-          onClearSearch={onClearSearch}
-          onPage={onPage}
-          matchPayloads={matchPayloads}
-          matchingTrackId={matchingTrackId}
-          debugMode={debugMode}
-          onOpenPath={onOpenPath}
-          onPlay={onPlay}
-          onReveal={onReveal}
-          onMatch={onMatch}
-          renderMatches={renderMatches}
-        />
-      ) : null}
+      <LibraryBrowseHeader {...libraryBrowseHeaderProps(props)} />
+      <LibraryBrowseExpandedBody props={props} />
     </div>
   );
 }
 
-function LibraryBrowseHeader({
-  payload,
-  expanded,
-  busy,
-  visibleTrackCount,
-  onToggle,
-  onLoad,
-}: {
+type LibraryBrowseExpandedBodyProps = { props: LibraryBrowsePanelProps };
+
+function LibraryBrowseExpandedBody({ props }: LibraryBrowseExpandedBodyProps) {
+  if (!props.expanded) {
+    return null;
+  }
+  return <LibraryBrowseBody {...props} />;
+}
+
+function libraryBrowseHeaderProps(props: LibraryBrowsePanelProps): LibraryBrowseHeaderProps {
+  return {
+    payload: props.payload,
+    expanded: props.expanded,
+    busy: props.busy,
+    visibleTrackCount: props.payload?.tracks?.length ?? 0,
+    onToggle: props.onToggle,
+    onLoad: props.onLoad,
+  };
+}
+
+type LibraryBrowseHeaderProps = {
   payload: BrowsePayload | null;
   expanded: boolean;
   busy: boolean;
   visibleTrackCount: number;
   onToggle: () => void;
   onLoad: () => void;
-}) {
+};
+
+function LibraryBrowseHeader(props: LibraryBrowseHeaderProps) {
+  const model = libraryBrowseHeaderModel(props);
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <button className="flex min-w-0 items-center gap-2 text-left" type="button" onClick={onToggle}>
-        <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="font-medium">Indexed library</span>
-        {payload?.cwd ? <span className="wrap-anywhere text-xs text-muted-foreground">{payload.cwd}</span> : null}
-      </button>
+      <LibraryBrowseHeaderTitle cwd={model.cwd} onToggle={props.onToggle} />
       <div className="flex flex-wrap items-center gap-2">
-        {payload ? (
-          <Badge variant="secondary">
-            {visibleTrackCount}/{payload.track_count ?? visibleTrackCount} files
-          </Badge>
-        ) : null}
-        <Button size="sm" variant="outline" disabled={busy} onClick={onLoad}>
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
-          {payload ? "Refresh" : "Browse"}
+        <OptionalBadge text={model.countText} />
+        <Button size="sm" variant="outline" disabled={props.busy} onClick={props.onLoad}>
+          <LibraryBrowseLoadIcon busy={props.busy} />
+          {model.loadLabel}
         </Button>
-        <Button size="sm" variant="ghost" onClick={onToggle}>
-          {expanded ? "Hide" : "Show"}
-        </Button>
+        <Button size="sm" variant="ghost" onClick={props.onToggle}>{model.toggleLabel}</Button>
       </div>
     </div>
   );
 }
 
-function LibraryBrowseBody({
-  payload,
-  busy,
-  matchPayloads,
-  matchingTrackId,
-  debugMode,
-  query,
-  sort,
-  sortDirection,
-  onQueryChange,
-  onSortChange,
-  onSortDirectionChange,
-  onSubmitSearch,
-  onClearSearch,
-  onPage,
-  onOpenPath,
-  onPlay,
-  onReveal,
-  onMatch,
-  renderMatches,
-}: {
-  payload: BrowsePayload | null;
-  busy: boolean;
-  matchPayloads: Record<string, MatchTrackPayload>;
-  matchingTrackId: string | null;
-  debugMode: boolean;
-  renderMatches?: (payload: MatchTrackPayload) => ReactNode;
-} & BrowseActions & BrowseSearchControlsProps & BrowsePagingActions) {
-  const roots = payload?.roots ?? [];
-  const folders = payload?.folders ?? [];
-  const tracks = payload?.tracks ?? [];
+type LibraryBrowseHeaderModel = {
+  cwd: string;
+  countText: string;
+  loadLabel: string;
+  toggleLabel: string;
+};
+
+function libraryBrowseHeaderModel(props: LibraryBrowseHeaderProps): LibraryBrowseHeaderModel {
+  return {
+    cwd: libraryBrowseCwd(props.payload),
+    countText: libraryBrowseCountText(props.payload, props.visibleTrackCount),
+    loadLabel: libraryBrowseLoadLabel(props.payload),
+    toggleLabel: libraryBrowseToggleLabel(props.expanded),
+  };
+}
+
+function libraryBrowseCwd(payload: BrowsePayload | null): string {
+  if (!payload) {
+    return "";
+  }
+  return payload.cwd || "";
+}
+
+function libraryBrowseLoadLabel(payload: BrowsePayload | null): string {
+  return payload ? "Refresh" : "Browse";
+}
+
+function libraryBrowseToggleLabel(expanded: boolean): string {
+  return expanded ? "Hide" : "Show";
+}
+
+function libraryBrowseCountText(payload: BrowsePayload | null, visibleTrackCount: number): string {
+  return payload ? `${visibleTrackCount}/${payload.track_count ?? visibleTrackCount} files` : "";
+}
+
+function LibraryBrowseHeaderTitle({ cwd, onToggle }: { cwd: string; onToggle: () => void }) {
+  return (
+    <button className="flex min-w-0 items-center gap-2 text-left" type="button" onClick={onToggle}>
+      <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <span className="font-medium">Indexed library</span>
+      <OptionalInlineText text={cwd} />
+    </button>
+  );
+}
+
+function OptionalInlineText({ text }: { text: string }) {
+  if (!text) {
+    return null;
+  }
+  return <span className="wrap-anywhere text-xs text-muted-foreground">{text}</span>;
+}
+
+function OptionalBadge({ text }: { text: string }) {
+  if (!text) {
+    return null;
+  }
+  return <Badge variant="secondary">{text}</Badge>;
+}
+
+function LibraryBrowseLoadIcon({ busy }: { busy: boolean }) {
+  return busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />;
+}
+
+function LibraryBrowseBody(props: LibraryBrowsePanelProps) {
+  const model = libraryBrowseBodyModel(props.payload);
   return (
     <div className="grid gap-3">
-      <LibraryBrowseWarning warning={payload?.warning} />
-      <LibraryBrowseControls
-        query={query}
-        sort={sort}
-        sortDirection={sortDirection}
-        busy={busy}
-        onQueryChange={onQueryChange}
-        onSortChange={onSortChange}
-        onSortDirectionChange={onSortDirectionChange}
-        onSubmitSearch={onSubmitSearch}
-        onClearSearch={onClearSearch}
-      />
-      <LibraryBrowseRoots payload={payload} roots={roots} onOpenPath={onOpenPath} />
-      <LibraryBrowseLocation payload={payload} onOpenPath={onOpenPath} />
-      <LibraryBrowseFolders folders={folders} onOpenPath={onOpenPath} />
-      <LibraryBrowsePager payload={payload} busy={busy} onPage={onPage} />
-      <LibraryBrowseTracks
-        payload={payload}
-        tracks={tracks}
-        busy={busy}
-        matchPayloads={matchPayloads}
-        matchingTrackId={matchingTrackId}
-        debugMode={debugMode}
-        onOpenPath={onOpenPath}
-        onPlay={onPlay}
-        onReveal={onReveal}
-        onMatch={onMatch}
-        renderMatches={renderMatches}
-      />
-      <LibraryBrowsePager payload={payload} busy={busy} onPage={onPage} />
+      <LibraryBrowseWarning warning={model.warning} />
+      <LibraryBrowseControls {...libraryBrowseControlsProps(props)} />
+      <LibraryBrowseNavigation model={model} payload={props.payload} onOpenPath={props.onOpenPath} />
+      <LibraryBrowsePager payload={props.payload} busy={props.busy} onPage={props.onPage} />
+      <LibraryBrowseTrackSection props={props} tracks={model.tracks} />
+      <LibraryBrowsePager payload={props.payload} busy={props.busy} onPage={props.onPage} />
     </div>
+  );
+}
+
+type LibraryBrowseBodyModel = {
+  warning?: string | null;
+  roots: BrowseRoot[];
+  folders: BrowseFolder[];
+  tracks: BrowseTrack[];
+};
+
+function libraryBrowseBodyModel(payload: BrowsePayload | null): LibraryBrowseBodyModel {
+  if (!payload) {
+    return emptyBrowseBodyModel();
+  }
+  return browseBodyModelFromPayload(payload);
+}
+
+function emptyBrowseBodyModel(): LibraryBrowseBodyModel {
+  return { warning: undefined, roots: [], folders: [], tracks: [] };
+}
+
+function browseBodyModelFromPayload(payload: BrowsePayload): LibraryBrowseBodyModel {
+  return {
+    warning: payload.warning,
+    roots: payload.roots ?? [],
+    folders: payload.folders ?? [],
+    tracks: payload.tracks ?? [],
+  };
+}
+
+function libraryBrowseControlsProps(
+  props: LibraryBrowsePanelProps,
+): BrowseSearchControlsProps & { busy: boolean; onSubmitSearch: () => void; onClearSearch: () => void } {
+  return {
+    query: props.query,
+    sort: props.sort,
+    sortDirection: props.sortDirection,
+    busy: props.busy,
+    onQueryChange: props.onQueryChange,
+    onSortChange: props.onSortChange,
+    onSortDirectionChange: props.onSortDirectionChange,
+    onSubmitSearch: props.onSubmitSearch,
+    onClearSearch: props.onClearSearch,
+  };
+}
+
+function LibraryBrowseNavigation({
+  model,
+  payload,
+  onOpenPath,
+}: {
+  model: LibraryBrowseBodyModel;
+  payload: BrowsePayload | null;
+  onOpenPath: (path: string) => void;
+}) {
+  return (
+    <>
+      <LibraryBrowseRoots payload={payload} roots={model.roots} onOpenPath={onOpenPath} />
+      <LibraryBrowseLocation payload={payload} onOpenPath={onOpenPath} />
+      <LibraryBrowseFolders folders={model.folders} onOpenPath={onOpenPath} />
+    </>
+  );
+}
+
+function LibraryBrowseTrackSection({ props, tracks }: { props: LibraryBrowsePanelProps; tracks: BrowseTrack[] }) {
+  return (
+    <LibraryBrowseTracks
+      payload={props.payload}
+      tracks={tracks}
+      busy={props.busy}
+      matchPayloads={props.matchPayloads}
+      matchingTrackId={props.matchingTrackId}
+      debugMode={props.debugMode}
+      onOpenPath={props.onOpenPath}
+      onPlay={props.onPlay}
+      onReveal={props.onReveal}
+      onMatch={props.onMatch}
+      renderMatches={props.renderMatches}
+    />
   );
 }
 
@@ -253,7 +295,7 @@ function LibraryBrowseControls({
   const selectedSort = friendlySortValue(sort, sortDirection);
   return (
     <div className="grid gap-2 rounded-md border bg-muted/40 p-2 text-xs">
-      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(12rem,auto)_auto]">
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(8rem,25%)] items-center gap-2">
         <Input
           className="h-8"
           value={query}
@@ -266,7 +308,7 @@ function LibraryBrowseControls({
           }}
         />
         <select
-          className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          className="h-8 min-w-0 rounded-md border border-input bg-background px-2 text-xs"
           value={selectedSort}
           aria-label="Sort indexed library"
           onChange={(event) => {
@@ -281,7 +323,7 @@ function LibraryBrowseControls({
             </option>
           ))}
         </select>
-        <div className="flex justify-end gap-2">
+        <div className="col-span-2 flex justify-end gap-2">
           <Button size="sm" variant="outline" disabled={busy || !query.trim()} onClick={onClearSearch}>
             Clear
           </Button>
@@ -312,43 +354,151 @@ function LibraryBrowsePager({
   busy: boolean;
   onPage: (offset: number) => void;
 }) {
-  if (!payload || !needsPagination(payload)) {
+  const model = libraryBrowsePagerModel(payload, busy);
+  if (!model) {
     return null;
   }
-  const limit = payload.limit ?? 50;
-  const offset = payload.offset ?? 0;
-  const total = payload.track_count ?? 0;
-  const shown = payload.tracks?.length ?? 0;
-  const start = total && shown ? offset + 1 : 0;
-  const end = offset + shown;
+  return <LibraryBrowsePagerView model={model} onPage={onPage} />;
+}
+
+type LibraryBrowsePagerModel = {
+  label: string;
+  previousOffset: number;
+  nextOffset: number;
+  previousDisabled: boolean;
+  nextDisabled: boolean;
+};
+
+function libraryBrowsePagerModel(payload: BrowsePayload | null, busy: boolean): LibraryBrowsePagerModel | null {
+  const metrics = browsePageMetrics(payload);
+  return metrics.visible ? browsePagerModelFromMetrics(metrics, busy) : null;
+}
+
+type BrowsePageMetrics = {
+  visible: boolean;
+  mode: string;
+  query: string;
+  limit: number;
+  offset: number;
+  total: number;
+  shown: number;
+  hasMore: boolean;
+};
+
+function browsePageMetrics(payload: BrowsePayload | null): BrowsePageMetrics {
+  if (!payload) {
+    return emptyBrowsePageMetrics();
+  }
+  return browsePageMetricsFromPayload(payload);
+}
+
+function emptyBrowsePageMetrics(): BrowsePageMetrics {
+  return {
+    visible: false,
+    mode: "browse",
+    query: "",
+    limit: 50,
+    offset: 0,
+    total: 0,
+    shown: 0,
+    hasMore: false,
+  };
+}
+
+function browsePageMetricsFromPayload(payload: BrowsePayload): BrowsePageMetrics {
+  const totals = browsePageTotals(payload);
+  return {
+    visible: browsePageVisibility(totals),
+    mode: payload.mode || "browse",
+    query: payload.query || "",
+    limit: totals.limit,
+    offset: totals.offset,
+    total: totals.total,
+    shown: browseShownCount(payload),
+    hasMore: totals.hasMore,
+  };
+}
+
+function browseShownCount(payload: BrowsePayload): number {
+  return payload.tracks?.length ?? 0;
+}
+
+function hasBrowsePages(payload: BrowsePayload | null): boolean {
+  if (!payload) {
+    return false;
+  }
+  return browsePageVisibility(browsePageTotals(payload));
+}
+
+type BrowsePageTotals = { limit: number; offset: number; total: number; hasMore: boolean };
+
+function browsePageTotals(payload: BrowsePayload): BrowsePageTotals {
+  return {
+    limit: numberOr(payload.limit, 50),
+    offset: numberOr(payload.offset, 0),
+    total: numberOr(payload.track_count, 0),
+    hasMore: Boolean(payload.has_more),
+  };
+}
+
+function browsePageVisibility(totals: BrowsePageTotals): boolean {
+  return totals.total > totals.limit || totals.offset > 0 || totals.hasMore;
+}
+
+function browsePagerModelFromMetrics(metrics: BrowsePageMetrics, busy: boolean): LibraryBrowsePagerModel {
+  return {
+    label: browsePagerLabel(metrics),
+    previousOffset: Math.max(0, metrics.offset - metrics.limit),
+    nextOffset: metrics.offset + metrics.limit,
+    previousDisabled: busy || metrics.offset <= 0,
+    nextDisabled: busy || !metrics.hasMore,
+  };
+}
+
+function browsePagerLabel(metrics: BrowsePageMetrics): string {
+  return `${browsePagerKind(metrics.mode)}: ${browsePageRange(metrics)} of ${metrics.total}${browseQuerySuffix(metrics.query)}`;
+}
+
+function browsePagerKind(mode: string): string {
+  return mode === "search" ? "Search results" : "Files";
+}
+
+function browsePageRange(metrics: BrowsePageMetrics): string {
+  return `${browsePageStart(metrics)}–${metrics.offset + metrics.shown}`;
+}
+
+function browsePageStart(metrics: BrowsePageMetrics): number {
+  return metrics.total > 0 && metrics.shown > 0 ? metrics.offset + 1 : 0;
+}
+
+function browseQuerySuffix(query: string): string {
+  return query ? ` for “${query}”` : "";
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" ? value : fallback;
+}
+
+function LibraryBrowsePagerView({
+  model,
+  onPage,
+}: {
+  model: LibraryBrowsePagerModel;
+  onPage: (offset: number) => void;
+}) {
   return (
     <div className="flex flex-col gap-2 rounded-md border bg-background/50 p-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-      <span>
-        {payload.mode === "search" ? "Search results" : "Files"}: {start}–{end} of {total}
-        {payload.query ? ` for “${payload.query}”` : ""}
-      </span>
+      <span>{model.label}</span>
       <div className="flex gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={busy || offset <= 0}
-          onClick={() => onPage(Math.max(0, offset - limit))}
-        >
+        <Button size="sm" variant="outline" disabled={model.previousDisabled} onClick={() => onPage(model.previousOffset)}>
           Previous
         </Button>
-        <Button size="sm" variant="outline" disabled={busy || !payload.has_more} onClick={() => onPage(offset + limit)}>
+        <Button size="sm" variant="outline" disabled={model.nextDisabled} onClick={() => onPage(model.nextOffset)}>
           Next
         </Button>
       </div>
     </div>
   );
-}
-
-function needsPagination(payload: BrowsePayload): boolean {
-  const limit = payload.limit ?? 50;
-  const offset = payload.offset ?? 0;
-  const total = payload.track_count ?? 0;
-  return total > limit || offset > 0 || Boolean(payload.has_more);
 }
 
 function LibraryBrowseRoots({
@@ -374,17 +524,38 @@ function LibraryBrowseRoots({
     <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
       <span className="font-medium text-foreground">Roots</span>
       {roots.map((root) => (
-        <Button
-          key={root.path}
-          size="sm"
-          variant={payload?.root === root.path ? "secondary" : "outline"}
-          onClick={() => onOpenPath(root.path)}
-        >
-          {root.name || root.path} {typeof root.track_count === "number" ? `(${root.track_count})` : ""}
-        </Button>
+        <LibraryBrowseRootButton key={root.path} root={root} activeRoot={payload?.root || ""} onOpenPath={onOpenPath} />
       ))}
     </div>
   );
+}
+
+function LibraryBrowseRootButton({
+  root,
+  activeRoot,
+  onOpenPath,
+}: {
+  root: BrowseRoot;
+  activeRoot: string;
+  onOpenPath: (path: string) => void;
+}) {
+  return (
+    <Button size="sm" variant={rootButtonVariant(root, activeRoot)} onClick={() => onOpenPath(root.path)}>
+      {rootButtonText(root)}
+    </Button>
+  );
+}
+
+function rootButtonVariant(root: BrowseRoot, activeRoot: string): "secondary" | "outline" {
+  return activeRoot === root.path ? "secondary" : "outline";
+}
+
+function rootButtonText(root: BrowseRoot): string {
+  return `${root.name || root.path} ${rootTrackCountText(root)}`.trim();
+}
+
+function rootTrackCountText(root: BrowseRoot): string {
+  return typeof root.track_count === "number" ? `(${root.track_count})` : "";
 }
 
 function LibraryBrowseLocation({
@@ -537,15 +708,7 @@ function LibraryBrowseTrackRow({
   );
 }
 
-function LibraryBrowseTrackActions({
-  track,
-  busy,
-  hasMatches,
-  matchLoading,
-  onPlay,
-  onReveal,
-  onMatch,
-}: {
+function LibraryBrowseTrackActions(props: {
   track: BrowseTrack;
   busy: boolean;
   hasMatches: boolean;
@@ -554,27 +717,41 @@ function LibraryBrowseTrackActions({
   onReveal: (track: BrowseTrack) => void;
   onMatch: (track: BrowseTrack) => void;
 }) {
+  const model = trackActionModel(props);
   return (
     <div className="flex shrink-0 flex-wrap gap-2">
-      <Button size="sm" variant="secondary" onClick={() => onPlay(track)}>
+      <Button size="sm" variant="secondary" onClick={() => props.onPlay(props.track)}>
         <Play className="h-3.5 w-3.5" />
         Play
       </Button>
-      <Button size="sm" variant="outline" onClick={() => onReveal(track)}>
+      <Button size="sm" variant="outline" onClick={() => props.onReveal(props.track)}>
         <FolderOpen className="h-3.5 w-3.5" />
         Show
       </Button>
-      <Button
-        size="sm"
-        variant={hasMatches ? "secondary" : "outline"}
-        disabled={busy || matchLoading}
-        onClick={() => onMatch(track)}
-      >
-        {matchLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListChecks className="h-3.5 w-3.5" />}
-        {hasMatches ? "Hide matches" : "Matches"}
+      <Button size="sm" variant={model.matchVariant} disabled={model.matchDisabled} onClick={() => props.onMatch(props.track)}>
+        <TrackMatchIcon loading={props.matchLoading} />
+        {model.matchLabel}
       </Button>
     </div>
   );
+}
+
+type TrackActionModel = {
+  matchVariant: "secondary" | "outline";
+  matchDisabled: boolean;
+  matchLabel: string;
+};
+
+function trackActionModel(props: { busy: boolean; hasMatches: boolean; matchLoading: boolean }): TrackActionModel {
+  return {
+    matchVariant: props.hasMatches ? "secondary" : "outline",
+    matchDisabled: props.busy || props.matchLoading,
+    matchLabel: props.hasMatches ? "Hide matches" : "Matches",
+  };
+}
+
+function TrackMatchIcon({ loading }: { loading: boolean }) {
+  return loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListChecks className="h-3.5 w-3.5" />;
 }
 
 function browseTrackTitle(track: BrowseTrack): string {
@@ -582,14 +759,27 @@ function browseTrackTitle(track: BrowseTrack): string {
 }
 
 function browseTrackMeta(track: BrowseTrack): string {
-  return [
-    [track.artist, track.album, track.genre].filter(Boolean).join(" · ") || "Unknown artist/album",
-    typeof track.bpm === "number" ? `${Math.round(track.bpm)} BPM` : null,
-    typeof track.duration_sec === "number" ? formatDuration(track.duration_sec) : null,
-    track.missing ? "missing" : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  return trackMetaParts(track).filter(Boolean).join(" · ");
+}
+
+function trackMetaParts(track: BrowseTrack): string[] {
+  return [artistAlbumGenreText(track), bpmText(track.bpm), durationText(track.duration_sec), missingText(track.missing)];
+}
+
+function artistAlbumGenreText(track: BrowseTrack): string {
+  return [track.artist, track.album, track.genre].filter(Boolean).join(" · ") || "Unknown artist/album";
+}
+
+function bpmText(bpm: BrowseTrack["bpm"]): string {
+  return typeof bpm === "number" ? `${Math.round(bpm)} BPM` : "";
+}
+
+function durationText(seconds: BrowseTrack["duration_sec"]): string {
+  return typeof seconds === "number" ? formatDuration(seconds) : "";
+}
+
+function missingText(missing: BrowseTrack["missing"]): string {
+  return missing ? "missing" : "";
 }
 
 function formatDuration(seconds: number): string {

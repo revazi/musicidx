@@ -598,45 +598,21 @@ export default function App() {
 
   async function loadBrowse(
     path?: string | null,
-    options: { query?: string; sort?: string; direction?: "asc" | "desc"; offset?: number } = {},
+    options: BrowseLoadOptions = {},
   ) {
     persistSettings(settings);
-    const nextQuery = options.query ?? browseQuery;
-    const nextSort = options.sort ?? browseSort;
-    const nextDirection = options.direction ?? browseSortDirection;
-    const nextOffset = Math.max(0, options.offset ?? 0);
-    const args = [
-      "browse",
-      "--json",
-      "--limit",
-      "50",
-      "--offset",
-      String(nextOffset),
-      "--sort",
-      nextSort,
-    ];
-    if (nextDirection === "desc") {
-      args.push("--desc");
-    }
-    if (nextQuery.trim()) {
-      args.push("--query", nextQuery.trim());
-    }
-    if (path) {
-      args.push("--path", path);
-    } else if (settings.musicFolder.trim()) {
-      args.push("--path", settings.musicFolder.trim());
-    }
+    const args = buildBrowseArgs(
+      resolveBrowseLoadOptions(path, options, {
+        browseQuery,
+        browseSort,
+        browseSortDirection,
+        musicFolder: settings.musicFolder,
+      }),
+    );
     const payload = await runJsonCommand<BrowsePayload>(args);
     setBrowsePayload(payload);
     setBrowseExpanded(true);
-    updateStatus(
-      payload.cwd
-        ? payload.mode === "search"
-          ? "Library search loaded"
-          : "Library browser loaded"
-        : "No indexed library roots found",
-      false,
-    );
+    updateStatus(browseStatusMessage(payload), false);
   }
 
   async function parseIntent() {
@@ -1661,17 +1637,7 @@ export default function App() {
   );
 }
 
-function Shell({
-  children,
-  status,
-  statusError,
-  working,
-  workingLabel,
-  canceling,
-  onCancel,
-  onDoctor,
-  onSettings,
-}: {
+type ShellProps = {
   children: React.ReactNode;
   status: string;
   statusError: boolean;
@@ -1681,54 +1647,98 @@ function Shell({
   onCancel: () => void;
   onDoctor: () => void;
   onSettings: () => void;
-}) {
+};
+
+function Shell(props: ShellProps) {
   return (
     <div className="min-h-screen bg-background text-foreground [background:radial-gradient(circle_at_20%_0%,rgba(168,85,247,0.16),transparent_28rem),radial-gradient(circle_at_90%_10%,rgba(217,70,239,0.08),transparent_24rem),hsl(var(--background))]">
       <div className="mx-auto grid w-full max-w-6xl gap-4 px-4 py-4 sm:px-6 lg:px-8">
-        <header className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-sm md:flex-row md:items-center md:justify-between">
-          <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-              Local-first music search
-            </p>
-            <h1 className="mt-1 text-3xl font-semibold tracking-tight">MusicIdx</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Index, search, judge, and export your local music library.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={statusError ? "destructive" : "secondary"} className="max-w-full wrap-anywhere">
-              {status}
-            </Badge>
-            <Button variant="outline" disabled={working} onClick={onDoctor}>
-              {working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
-              Doctor
-            </Button>
-            <Button variant="outline" size="icon" onClick={onSettings} aria-label="Settings">
-              <Settings className="h-4 w-4" />
-            </Button>
-          </div>
-        </header>
-        {working ? (
-          <div className="sticky top-3 z-50 rounded-xl border bg-card/95 p-3 shadow-lg backdrop-blur-md">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-center gap-2 text-sm">
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
-                <span className="font-medium text-foreground">Working</span>
-                <span className="wrap-anywhere text-muted-foreground">{workingLabel || status}</span>
-              </div>
-              <Button size="sm" variant="outline" disabled={canceling} onClick={onCancel}>
-                {canceling ? "Cancelling…" : "Cancel"}
-              </Button>
-            </div>
-          </div>
-        ) : null}
-        {children}
+        <ShellHeader {...props} />
+        <WorkingBanner {...props} />
+        {props.children}
       </div>
     </div>
   );
 }
 
+function ShellHeader({ status, statusError, working, onDoctor, onSettings }: ShellProps) {
+  return (
+    <header className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-sm md:flex-row md:items-center md:justify-between">
+      <ShellTitle />
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={statusBadgeVariant(statusError)} className="max-w-full wrap-anywhere">
+          {status}
+        </Badge>
+        <Button variant="outline" disabled={working} onClick={onDoctor}>
+          <DoctorIcon working={working} />
+          Doctor
+        </Button>
+        <Button variant="outline" size="icon" onClick={onSettings} aria-label="Settings">
+          <Settings className="h-4 w-4" />
+        </Button>
+      </div>
+    </header>
+  );
+}
+
+function ShellTitle() {
+  return (
+    <div className="min-w-0">
+      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+        Local-first music search
+      </p>
+      <h1 className="mt-1 text-3xl font-semibold tracking-tight">MusicIdx</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Index, search, judge, and export your local music library.
+      </p>
+    </div>
+  );
+}
+
+function statusBadgeVariant(statusError: boolean): "destructive" | "secondary" {
+  return statusError ? "destructive" : "secondary";
+}
+
+function DoctorIcon({ working }: { working: boolean }) {
+  return working ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />;
+}
+
+function WorkingBanner({ working, workingLabel, status, canceling, onCancel }: ShellProps) {
+  if (!working) {
+    return null;
+  }
+  return (
+    <div className="sticky top-3 z-50 rounded-xl border bg-card/95 p-3 shadow-lg backdrop-blur-md">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-2 text-sm">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+          <span className="font-medium text-foreground">Working</span>
+          <span className="wrap-anywhere text-muted-foreground">{workingLabel || status}</span>
+        </div>
+        <Button size="sm" variant="outline" disabled={canceling} onClick={onCancel}>
+          {cancelButtonText(canceling)}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function cancelButtonText(canceling: boolean): string {
+  return canceling ? "Cancelling…" : "Cancel";
+}
+
 type EvidenceCountStages = ReadonlyArray<readonly [string, Record<string, unknown>]>;
+
+type SearchPanelModel = {
+  intent: SearchIntentSummary;
+  diagnostics: Record<string, unknown>;
+  evidenceCountStages: EvidenceCountStages;
+  suggestions: SearchSuggestion[];
+  examples: SearchTypeExample[];
+  notice: SearchNotice | null;
+  noticeText: string;
+  visible: boolean;
+};
 
 function SearchParametersPanel({
   payload,
@@ -1739,39 +1749,76 @@ function SearchParametersPanel({
   debugMode: boolean;
   onSearchSuggestion: (query: string) => Promise<void>;
 }) {
-  const intent = payload.intent ?? {};
-  const diagnostics = payload.diagnostics ?? {};
-  const evidenceCountStages = searchEvidenceCountStages(diagnostics);
-  const suggestions = searchSuggestionsFromDiagnostics(diagnostics);
-  const visibleSuggestions = debugMode ? suggestions : compactSearchSuggestions(suggestions);
-  const examples = searchTypeExamplesFromDiagnostics(diagnostics);
-  const visibleExamples = debugMode ? examples : compactSearchTypeExamples(examples);
-  const notice = searchNoticeFromDiagnostics(diagnostics);
-  const noticeText = notice ? searchNoticeDisplayText(notice, debugMode) : "";
-
-  if (!debugMode && !noticeText && !visibleSuggestions.length && !visibleExamples.length) {
+  const model = searchPanelModel(payload, debugMode);
+  if (!model.visible) {
     return null;
   }
-
   return (
     <div className="grid gap-3 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-      <SearchDebugBadges payload={payload} intent={intent} debugMode={debugMode} />
+      <SearchDebugBadges payload={payload} intent={model.intent} debugMode={debugMode} />
       <SearchLlmFallback payload={payload} debugMode={debugMode} />
-      <SearchNoticeMessage notice={notice} noticeText={noticeText} />
-      <SearchSuggestionButtons suggestions={visibleSuggestions} onSearchSuggestion={onSearchSuggestion} />
-      <SearchTypeExamplesPanel examples={visibleExamples} onSearchSuggestion={onSearchSuggestion} />
+      <SearchNoticeMessage notice={model.notice} noticeText={model.noticeText} />
+      <SearchSuggestionButtons suggestions={model.suggestions} onSearchSuggestion={onSearchSuggestion} />
+      <SearchTypeExamplesPanel examples={model.examples} onSearchSuggestion={onSearchSuggestion} />
       <SearchLlmHintsPanel hints={payload.llm_hints} debugMode={debugMode} />
       <SearchDebugIntentGrid
         payload={payload}
-        intent={intent}
-        diagnostics={diagnostics}
-        evidenceCountStages={evidenceCountStages}
+        intent={model.intent}
+        diagnostics={model.diagnostics}
+        evidenceCountStages={model.evidenceCountStages}
         debugMode={debugMode}
       />
-      <SearchEvidenceCountsPanel evidenceCountStages={evidenceCountStages} debugMode={debugMode} />
-      <SearchRankingWeightsPanel weights={recordValue(diagnostics.weights)} debugMode={debugMode} />
+      <SearchEvidenceCountsPanel evidenceCountStages={model.evidenceCountStages} debugMode={debugMode} />
+      <SearchRankingWeightsPanel weights={recordValue(model.diagnostics.weights)} debugMode={debugMode} />
     </div>
   );
+}
+
+function searchPanelModel(payload: SearchPayload, debugMode: boolean): SearchPanelModel {
+  const diagnostics = payload.diagnostics ?? {};
+  const suggestions = visibleSearchSuggestions(diagnostics, debugMode);
+  const examples = visibleSearchExamples(diagnostics, debugMode);
+  const notice = searchNoticeFromDiagnostics(diagnostics);
+  const noticeText = noticeTextForPanel(notice, debugMode);
+  return {
+    intent: payload.intent ?? {},
+    diagnostics,
+    evidenceCountStages: searchEvidenceCountStages(diagnostics),
+    suggestions,
+    examples,
+    notice,
+    noticeText,
+    visible: panelHasVisibleContent(debugMode, noticeText, suggestions, examples),
+  };
+}
+
+function visibleSearchSuggestions(
+  diagnostics: Record<string, unknown>,
+  debugMode: boolean,
+): SearchSuggestion[] {
+  const suggestions = searchSuggestionsFromDiagnostics(diagnostics);
+  return debugMode ? suggestions : compactSearchSuggestions(suggestions);
+}
+
+function visibleSearchExamples(
+  diagnostics: Record<string, unknown>,
+  debugMode: boolean,
+): SearchTypeExample[] {
+  const examples = searchTypeExamplesFromDiagnostics(diagnostics);
+  return debugMode ? examples : compactSearchTypeExamples(examples);
+}
+
+function noticeTextForPanel(notice: SearchNotice | null, debugMode: boolean): string {
+  return notice ? searchNoticeDisplayText(notice, debugMode) : "";
+}
+
+function panelHasVisibleContent(
+  debugMode: boolean,
+  noticeText: string,
+  suggestions: SearchSuggestion[],
+  examples: SearchTypeExample[],
+): boolean {
+  return debugMode || Boolean(noticeText || suggestions.length || examples.length);
 }
 
 function SearchDebugBadges({
@@ -1786,21 +1833,61 @@ function SearchDebugBadges({
   if (!debugMode) {
     return null;
   }
-  const llmUsed = Boolean(payload.parser && payload.parser !== "dynamic");
+  const badges = searchDebugBadgeModel(payload, intent);
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="font-medium text-foreground">Search parameters used</span>
-      <Badge variant="secondary">parser: {payload.parser || "dynamic"}</Badge>
-      <Badge variant={payload.llm_error ? "outline" : "secondary"}>
-        {payload.llm_error ? "local parser fallback" : llmUsed ? "LLM hints" : "local parser"}
-      </Badge>
-      <Badge variant="secondary">limit: {intent.limit ?? "auto"}</Badge>
-      <Badge variant="secondary">
-        {intent.use_semantic ? "semantic search on" : "semantic search off"}
-      </Badge>
+      <Badge variant="secondary">parser: {badges.parser}</Badge>
+      <Badge variant={badges.parserVariant}>{badges.parserMode}</Badge>
+      <Badge variant="secondary">limit: {badges.limit}</Badge>
+      <Badge variant="secondary">{badges.semantic}</Badge>
       <Badge variant="outline">raw calibrated scores</Badge>
     </div>
   );
+}
+
+type SearchDebugBadgeModel = {
+  parser: string;
+  parserMode: string;
+  parserVariant: "secondary" | "outline";
+  limit: string | number;
+  semantic: string;
+};
+
+function searchDebugBadgeModel(
+  payload: SearchPayload,
+  intent: SearchIntentSummary,
+): SearchDebugBadgeModel {
+  return {
+    parser: parserLabel(payload),
+    parserMode: searchParserMode(payload),
+    parserVariant: parserBadgeVariant(payload),
+    limit: intentLimitLabel(intent),
+    semantic: semanticSearchLabel(intent),
+  };
+}
+
+function parserLabel(payload: SearchPayload): string {
+  return payload.parser || "dynamic";
+}
+
+function parserBadgeVariant(payload: SearchPayload): "secondary" | "outline" {
+  return payload.llm_error ? "outline" : "secondary";
+}
+
+function intentLimitLabel(intent: SearchIntentSummary): string | number {
+  return intent.limit ?? "auto";
+}
+
+function semanticSearchLabel(intent: SearchIntentSummary): string {
+  return intent.use_semantic ? "semantic search on" : "semantic search off";
+}
+
+function searchParserMode(payload: SearchPayload): string {
+  if (payload.llm_error) {
+    return "local parser fallback";
+  }
+  return payload.parser && payload.parser !== "dynamic" ? "LLM hints" : "local parser";
 }
 
 function SearchLlmFallback({ payload, debugMode }: { payload: SearchPayload; debugMode: boolean }) {
@@ -1824,21 +1911,29 @@ function SearchNoticeMessage({
   if (!noticeText) {
     return null;
   }
+  const model = searchNoticeModel(notice);
   return (
-    <div
-      className={cn(
-        "rounded-md border p-2",
-        notice?.level === "warning"
-          ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
-          : "bg-background/50",
-      )}
-    >
-      <span className="font-medium text-foreground">
-        {notice?.level === "warning" ? "Search note" : "Search tip"}: 
-      </span>
+    <div className={model.className}>
+      <span className="font-medium text-foreground">{model.label}: </span>
       {noticeText}
     </div>
   );
+}
+
+type SearchNoticeModel = { className: string; label: string };
+
+function searchNoticeModel(notice: SearchNotice | null): SearchNoticeModel {
+  const warning = notice?.level === "warning";
+  return {
+    className: cn("rounded-md border p-2", searchNoticeClass(warning)),
+    label: warning ? "Search note" : "Search tip",
+  };
+}
+
+function searchNoticeClass(warning: boolean): string {
+  return warning
+    ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+    : "bg-background/50";
 }
 
 function SearchSuggestionButtons({
@@ -1909,28 +2004,39 @@ function SearchTypeExampleItem({
   index: number;
   onSearchSuggestion: (query: string) => Promise<void>;
 }) {
-  if (!example.query) {
-    return (
-      <span
-        key={`${example.type || "type"}:${index}`}
-        className="rounded-md border bg-muted/50 px-2 py-1"
-        title={example.reason}
-      >
-        {example.label || example.type || "Tip"}: {example.reason}
-      </span>
-    );
+  const query = example.query;
+  if (!query) {
+    return <SearchTypeTip example={example} index={index} />;
   }
+  return <SearchTypeButton example={example} query={query} onSearchSuggestion={onSearchSuggestion} />;
+}
+
+function SearchTypeTip({ example, index }: { example: SearchTypeExample; index: number }) {
   return (
-    <Button
-      key={`${example.type || "type"}:${example.query}`}
-      size="sm"
-      variant="outline"
-      title={example.reason}
-      onClick={() => void onSearchSuggestion(example.query || "")}
-    >
-      {example.label || example.type || "Example"}: {example.query}
+    <span className="rounded-md border bg-muted/50 px-2 py-1" title={example.reason}>
+      {searchTypeLabel(example, "Tip")}: {example.reason || index}
+    </span>
+  );
+}
+
+function SearchTypeButton({
+  example,
+  query,
+  onSearchSuggestion,
+}: {
+  example: SearchTypeExample;
+  query: string;
+  onSearchSuggestion: (query: string) => Promise<void>;
+}) {
+  return (
+    <Button size="sm" variant="outline" title={example.reason} onClick={() => void onSearchSuggestion(query)}>
+      {searchTypeLabel(example, "Example")}: {query}
     </Button>
   );
+}
+
+function searchTypeLabel(example: SearchTypeExample, fallback: string): string {
+  return example.label || example.type || fallback;
 }
 
 function SearchLlmHintsPanel({
@@ -1940,7 +2046,10 @@ function SearchLlmHintsPanel({
   hints: SearchLlmHints | null | undefined;
   debugMode: boolean;
 }) {
-  if (!debugMode || !hints) {
+  if (!debugMode) {
+    return null;
+  }
+  if (!hints) {
     return null;
   }
   return (
@@ -1949,18 +2058,23 @@ function SearchLlmHintsPanel({
         LLM-provided hints before local validation/merge
       </summary>
       <div className="mt-2 grid gap-2 md:grid-cols-2">
-        <SearchParamBlock label="LLM contexts" value={chipList(hints.contexts)} />
-        <SearchParamBlock label="LLM prefer concepts" value={chipList(hints.prefer_tag_concepts, 12)} />
-        <SearchParamBlock label="LLM avoid concepts" value={chipList(hints.avoid_tag_concepts, 12)} />
-        <SearchParamBlock label="LLM features" value={formatFeaturePreferences(hints.feature_preferences)} />
-        <SearchParamBlock
-          label="LLM sort"
-          value={hints.sort_by?.length ? hints.sort_by.map(formatSortSpec).join(" · ") : "none"}
-        />
-        <SearchParamBlock label="LLM notes" value={hints.notes || "none"} />
+        {llmHintBlocks(hints).map((block) => (
+          <SearchParamBlock key={block.label} label={block.label} value={block.value} />
+        ))}
       </div>
     </details>
   );
+}
+
+function llmHintBlocks(hints: SearchLlmHints): SearchDebugIntentValue[] {
+  return [
+    { label: "LLM contexts", value: chipList(hints.contexts) },
+    { label: "LLM prefer concepts", value: chipList(hints.prefer_tag_concepts, 12) },
+    { label: "LLM avoid concepts", value: chipList(hints.avoid_tag_concepts, 12) },
+    { label: "LLM features", value: formatFeaturePreferences(hints.feature_preferences) },
+    { label: "LLM sort", value: formatSortSpecList(hints.sort_by) },
+    { label: "LLM notes", value: hints.notes || "none" },
+  ];
 }
 
 function SearchDebugIntentGrid({
@@ -1979,29 +2093,37 @@ function SearchDebugIntentGrid({
   if (!debugMode) {
     return null;
   }
-  const featureEntries = Object.entries(intent.feature_ranges ?? {});
-  const sortSpecs = intent.sort_by ?? [];
-  const scoreWarnings = stringList(diagnostics.score_warnings);
+  const values = searchDebugIntentValues(payload, intent, diagnostics, evidenceCountStages);
   return (
     <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-      <SearchParamBlock label="Query" value={payload.query || "—"} />
-      <SearchParamBlock label="Semantic model" value={intent.semantic_model || "not indexed/disabled"} />
-      <SearchParamBlock label="Contexts" value={chipList(intent.contexts)} />
-      <SearchParamBlock label="Prefer tags" value={chipList(intent.prefer_tags, 12)} />
-      <SearchParamBlock label="Avoid tags" value={chipList(intent.avoid_tags, 10)} />
-      <SearchParamBlock
-        label="Feature ranges"
-        value={featureEntries.length ? featureEntries.map(formatFeatureRange).join(" · ") : "none"}
-      />
-      <SearchParamBlock label="Sort" value={sortSpecs.length ? sortSpecs.map(formatSortSpec).join(" · ") : "none"} />
-      <SearchParamBlock
-        label="Score calibration"
-        value={String(diagnostics.score_calibration || diagnostics.score_normalization || "raw")}
-      />
-      <SearchParamBlock label="Diagnostics" value={formatSearchDiagnostics(diagnostics, scoreWarnings)} />
-      <SearchParamBlock label="Evidence counts" value={formatEvidenceCountStages(evidenceCountStages)} />
+      {values.map((item) => (
+        <SearchParamBlock key={item.label} label={item.label} value={item.value} />
+      ))}
     </div>
   );
+}
+
+type SearchDebugIntentValue = { label: string; value: string };
+
+function searchDebugIntentValues(
+  payload: SearchPayload,
+  intent: SearchIntentSummary,
+  diagnostics: Record<string, unknown>,
+  evidenceCountStages: EvidenceCountStages,
+): SearchDebugIntentValue[] {
+  const scoreWarnings = stringList(diagnostics.score_warnings);
+  return [
+    { label: "Query", value: payload.query || "—" },
+    { label: "Semantic model", value: intent.semantic_model || "not indexed/disabled" },
+    { label: "Contexts", value: chipList(intent.contexts) },
+    { label: "Prefer tags", value: chipList(intent.prefer_tags, 12) },
+    { label: "Avoid tags", value: chipList(intent.avoid_tags, 10) },
+    { label: "Feature ranges", value: formatFeatureRanges(intent) },
+    { label: "Sort", value: formatSortSpecs(intent) },
+    { label: "Score calibration", value: formatScoreCalibration(diagnostics) },
+    { label: "Diagnostics", value: formatSearchDiagnostics(diagnostics, scoreWarnings) },
+    { label: "Evidence counts", value: formatEvidenceCountStages(evidenceCountStages) },
+  ];
 }
 
 function SearchEvidenceCountsPanel({
@@ -2075,83 +2197,221 @@ function MatchSummaryPanel({
       </div>
       {reports.length ? (
         <div className="grid gap-2">
-          {reports.slice(0, 5).map((report, index) => {
-            const candidate = searchResultFromMatchReport(report);
-            return (
-              <div key={`${report.track_b?.track_id || index}`} className="rounded-md border bg-background/50 p-2">
-                <div className="flex min-w-0 items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="wrap-anywhere font-medium text-foreground">
-                      {report.track_b?.artist ? `${report.track_b.artist} · ` : ""}
-                      {report.track_b?.title || report.track_b?.track_id || "candidate"}
-                    </p>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      <span>closest {numericText(report.candidate_score)}</span>
-                      <span>identity {report.confidence || "low"} {numericText(report.confidence_score)}</span>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 flex-wrap justify-end gap-1">
-                    <Badge variant={matchStrengthVariant(report.candidate_strength)}>
-                      {report.candidate_strength || "weak"}
-                    </Badge>
-                    <Badge variant={report.identity_decision === "same" ? "secondary" : "outline"}>
-                      {report.decision || "unknown"}
-                    </Badge>
-                  </div>
-                </div>
-                {report.candidate_summary ? (
-                  <p className="mt-1 wrap-anywhere text-foreground">{report.candidate_summary}</p>
-                ) : null}
-                {debugMode && report.track_b?.path ? (
-                  <p className="mt-1 wrap-anywhere text-muted-foreground">{report.track_b.path}</p>
-                ) : null}
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button size="sm" variant="secondary" disabled={!candidate} onClick={() => onPlayCandidate(report)}>
-                    <Play className="h-3.5 w-3.5" />
-                    Play
-                  </Button>
-                  <Button size="sm" variant="outline" disabled={!candidate} onClick={() => onRevealCandidate(report)}>
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    Show
-                  </Button>
-                </div>
-                {debugMode && report.candidate_reasons?.length ? (
-                  <p className="mt-1 wrap-anywhere">Closest signals: {report.candidate_reasons.join("; ")}</p>
-                ) : null}
-                {debugMode ? (
-                  <details className="mt-2 rounded-md border bg-muted/30 p-2">
-                    <summary className="cursor-pointer font-medium text-foreground">Evidence details</summary>
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {matchEvidenceChips(report.evidence).map((chip) => (
-                        <Badge key={chip} variant="outline">{chip}</Badge>
-                      ))}
-                    </div>
-                    <p className="mt-2 wrap-anywhere text-muted-foreground">
-                      {formatMatchEvidenceDetails(report.evidence)}
-                    </p>
-                  </details>
-                ) : null}
-                {debugMode && report.candidate_scores ? (
-                  <p className="mt-1 wrap-anywhere text-muted-foreground">
-                    Score breakdown: {formatMatchCandidateScores(report.candidate_scores)}
-                  </p>
-                ) : null}
-                {debugMode && report.reasons?.length ? (
-                  <p className="mt-1 wrap-anywhere">Identity: {report.reasons.join("; ")}</p>
-                ) : null}
-                {debugMode && report.warnings?.length ? (
-                  <p className="mt-1 wrap-anywhere text-yellow-700 dark:text-yellow-300">
-                    {report.warnings.join("; ")}
-                  </p>
-                ) : null}
-              </div>
-            );
-          })}
+          {reports.slice(0, 5).map((report, index) => (
+            <MatchReportRow
+              key={`${report.track_b?.track_id || index}`}
+              report={report}
+              debugMode={debugMode}
+              onPlayCandidate={onPlayCandidate}
+              onRevealCandidate={onRevealCandidate}
+            />
+          ))}
         </div>
       ) : (
         <p>No nearby candidates found.</p>
       )}
     </div>
+  );
+}
+
+function MatchReportRow({
+  report,
+  debugMode,
+  onPlayCandidate,
+  onRevealCandidate,
+}: {
+  report: MatchReport;
+  debugMode: boolean;
+  onPlayCandidate: (report: MatchReport) => void;
+  onRevealCandidate: (report: MatchReport) => void;
+}) {
+  const candidate = searchResultFromMatchReport(report);
+  return (
+    <div className="rounded-md border bg-background/50 p-2">
+      <MatchReportHeader report={report} />
+      <OptionalText className="mt-1 wrap-anywhere text-foreground" text={report.candidate_summary} />
+      <OptionalText
+        className="mt-1 wrap-anywhere text-muted-foreground"
+        text={debugMode ? report.track_b?.path : null}
+      />
+      <MatchReportActions
+        report={report}
+        hasCandidate={Boolean(candidate)}
+        onPlayCandidate={onPlayCandidate}
+        onRevealCandidate={onRevealCandidate}
+      />
+      <MatchReportDebugDetails report={report} debugMode={debugMode} />
+    </div>
+  );
+}
+
+function MatchReportHeader({ report }: { report: MatchReport }) {
+  const model = matchReportHeaderModel(report);
+  return (
+    <div className="flex min-w-0 items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="wrap-anywhere font-medium text-foreground">{model.title}</p>
+        <div className="mt-1 flex flex-wrap gap-2">
+          <span>{model.closest}</span>
+          <span>{model.identity}</span>
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap justify-end gap-1">
+        <Badge variant={model.strengthVariant}>{model.strength}</Badge>
+        <Badge variant={model.decisionVariant}>{model.decision}</Badge>
+      </div>
+    </div>
+  );
+}
+
+type MatchReportHeaderModel = {
+  title: string;
+  closest: string;
+  identity: string;
+  strength: string;
+  strengthVariant: "default" | "secondary" | "outline";
+  decision: string;
+  decisionVariant: "secondary" | "outline";
+};
+
+function matchReportHeaderModel(report: MatchReport): MatchReportHeaderModel {
+  return {
+    title: matchReportTitle(report),
+    closest: `closest ${numericText(report.candidate_score)}`,
+    identity: `identity ${matchConfidenceLabel(report)} ${numericText(report.confidence_score)}`,
+    strength: report.candidate_strength || "weak",
+    strengthVariant: matchStrengthVariant(report.candidate_strength),
+    decision: report.decision || "unknown",
+    decisionVariant: matchDecisionVariant(report),
+  };
+}
+
+function matchConfidenceLabel(report: MatchReport): string {
+  return report.confidence || "low";
+}
+
+function matchDecisionVariant(report: MatchReport): "secondary" | "outline" {
+  return report.identity_decision === "same" ? "secondary" : "outline";
+}
+
+function matchReportTitle(report: MatchReport): string {
+  return joinOptionalPrefix(trackArtistPrefix(report.track_b), matchTrackTitle(report.track_b));
+}
+
+function trackArtistPrefix(track: MatchReport["track_b"]): string {
+  return track?.artist ? `${track.artist} · ` : "";
+}
+
+function matchTrackTitle(track: MatchReport["track_b"]): string {
+  return trackTitleValue(track) || trackIdValue(track) || "candidate";
+}
+
+function trackTitleValue(track: MatchReport["track_b"]): string {
+  return track?.title || "";
+}
+
+function trackIdValue(track: MatchReport["track_b"]): string {
+  return track?.track_id || "";
+}
+
+function joinOptionalPrefix(prefix: string, text: string): string {
+  return `${prefix}${text}`;
+}
+
+function OptionalText({ className, text }: { className: string; text?: string | null }) {
+  if (!text) {
+    return null;
+  }
+  return <p className={className}>{text}</p>;
+}
+
+function MatchReportActions({
+  report,
+  hasCandidate,
+  onPlayCandidate,
+  onRevealCandidate,
+}: {
+  report: MatchReport;
+  hasCandidate: boolean;
+  onPlayCandidate: (report: MatchReport) => void;
+  onRevealCandidate: (report: MatchReport) => void;
+}) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      <Button size="sm" variant="secondary" disabled={!hasCandidate} onClick={() => onPlayCandidate(report)}>
+        <Play className="h-3.5 w-3.5" />
+        Play
+      </Button>
+      <Button size="sm" variant="outline" disabled={!hasCandidate} onClick={() => onRevealCandidate(report)}>
+        <FolderOpen className="h-3.5 w-3.5" />
+        Show
+      </Button>
+    </div>
+  );
+}
+
+function MatchReportDebugDetails({ report, debugMode }: { report: MatchReport; debugMode: boolean }) {
+  if (!debugMode) {
+    return null;
+  }
+  return (
+    <>
+      {matchDebugTextItems(report).map((item) => (
+        <OptionalText key={item.key} className={item.className} text={item.text} />
+      ))}
+      <MatchEvidenceDetails evidence={report.evidence} />
+    </>
+  );
+}
+
+type MatchDebugTextItem = { key: string; className: string; text: string | null };
+
+function matchDebugTextItems(report: MatchReport): MatchDebugTextItem[] {
+  return [
+    matchDebugTextItem("closest", "mt-1 wrap-anywhere", listText("Closest signals", report.candidate_reasons)),
+    matchDebugTextItem(
+      "score",
+      "mt-1 wrap-anywhere text-muted-foreground",
+      scoreBreakdownText(report.candidate_scores),
+    ),
+    matchDebugTextItem("identity", "mt-1 wrap-anywhere", listText("Identity", report.reasons)),
+    matchDebugTextItem(
+      "warnings",
+      "mt-1 wrap-anywhere text-yellow-700 dark:text-yellow-300",
+      plainListText(report.warnings),
+    ),
+  ];
+}
+
+function matchDebugTextItem(key: string, className: string, text: string | null): MatchDebugTextItem {
+  return { key, className, text };
+}
+
+function listText(label: string, values: string[] | undefined): string | null {
+  return values?.length ? `${label}: ${values.join("; ")}` : null;
+}
+
+function plainListText(values: string[] | undefined): string | null {
+  return values?.length ? values.join("; ") : null;
+}
+
+function scoreBreakdownText(scores: Record<string, number> | undefined): string | null {
+  return scores ? `Score breakdown: ${formatMatchCandidateScores(scores)}` : null;
+}
+
+function MatchEvidenceDetails({ evidence }: { evidence?: MatchEvidenceItem[] }) {
+  return (
+    <details className="mt-2 rounded-md border bg-muted/30 p-2">
+      <summary className="cursor-pointer font-medium text-foreground">Evidence details</summary>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {matchEvidenceChips(evidence).map((chip) => (
+          <Badge key={chip} variant="outline">{chip}</Badge>
+        ))}
+      </div>
+      <p className="mt-2 wrap-anywhere text-muted-foreground">
+        {formatMatchEvidenceDetails(evidence)}
+      </p>
+    </details>
   );
 }
 
@@ -2188,13 +2448,21 @@ function formatEvidenceDetailsObject(details: Record<string, unknown>): string {
 }
 
 function formatCompactUnknown(value: unknown): string {
+  const formatter = compactUnknownFormatter(value);
+  return formatter ? formatter(value) : String(value ?? "—");
+}
+
+function compactUnknownFormatter(value: unknown): ((value: unknown) => string) | null {
   if (Array.isArray(value)) {
-    return `[${value.slice(0, 4).map(formatCompactUnknown).join(", ")}${value.length > 4 ? ", …" : ""}]`;
+    return formatCompactArray;
   }
-  if (value && typeof value === "object") {
-    return "{…}";
-  }
-  return String(value ?? "—");
+  return value && typeof value === "object" ? () => "{…}" : null;
+}
+
+function formatCompactArray(value: unknown): string {
+  const values = Array.isArray(value) ? value : [];
+  const suffix = values.length > 4 ? ", …" : "";
+  return `[${values.slice(0, 4).map(formatCompactUnknown).join(", ")}${suffix}]`;
 }
 
 function matchStrengthVariant(strength: MatchReport["candidate_strength"]): "default" | "secondary" | "outline" {
@@ -2208,20 +2476,39 @@ function matchStrengthVariant(strength: MatchReport["candidate_strength"]): "def
 }
 
 function searchResultFromMatchReport(report: MatchReport): SearchResult | null {
+  const track = playableMatchTrack(report);
+  return track ? searchResultFromMatchTrack(report, track) : null;
+}
+
+type PlayableMatchTrack = NonNullable<MatchReport["track_b"]> & { path: string };
+
+function playableMatchTrack(report: MatchReport): PlayableMatchTrack | null {
   const track = report.track_b;
-  if (!track?.path) {
-    return null;
-  }
+  return track?.path ? { ...track, path: track.path } : null;
+}
+
+function searchResultFromMatchTrack(
+  report: MatchReport,
+  track: PlayableMatchTrack,
+): SearchResult {
   return {
     track_id: track.track_id || track.path,
     path: track.path,
     title: track.title,
     artist: track.artist,
     album: track.album,
-    score: report.candidate_score ?? report.confidence_score ?? 0,
+    score: matchReportScore(report),
     confidence: report.confidence ?? null,
-    why: report.candidate_reasons?.length ? report.candidate_reasons : report.reasons,
+    why: matchReportWhy(report),
   };
+}
+
+function matchReportScore(report: MatchReport): number {
+  return report.candidate_score ?? report.confidence_score ?? 0;
+}
+
+function matchReportWhy(report: MatchReport): string[] | undefined {
+  return report.candidate_reasons?.length ? report.candidate_reasons : report.reasons;
 }
 
 function IndexHealthCard({ health }: { health: IndexHealthPayload }) {
@@ -2621,6 +2908,80 @@ function formatCount(label: string, value: number | undefined): string | null {
   return value === undefined ? null : `${value} ${label}`;
 }
 
+type BrowseLoadOptions = {
+  query?: string;
+  sort?: string;
+  direction?: "asc" | "desc";
+  offset?: number;
+};
+
+type BuildBrowseArgsOptions = Required<BrowseLoadOptions> & {
+  path?: string | null;
+  musicFolder: string;
+};
+
+type BrowseLoadContext = {
+  browseQuery: string;
+  browseSort: string;
+  browseSortDirection: "asc" | "desc";
+  musicFolder: string;
+};
+
+function resolveBrowseLoadOptions(
+  path: string | null | undefined,
+  options: BrowseLoadOptions,
+  context: BrowseLoadContext,
+): BuildBrowseArgsOptions {
+  return {
+    path,
+    musicFolder: context.musicFolder,
+    query: optionValue(options.query, context.browseQuery),
+    sort: optionValue(options.sort, context.browseSort),
+    direction: optionValue(options.direction, context.browseSortDirection),
+    offset: optionValue(options.offset, 0),
+  };
+}
+
+function optionValue<T>(value: T | undefined, fallback: T): T {
+  return value === undefined ? fallback : value;
+}
+
+function buildBrowseArgs(options: BuildBrowseArgsOptions): string[] {
+  const args = [
+    "browse",
+    "--json",
+    "--limit",
+    "50",
+    "--offset",
+    String(Math.max(0, options.offset)),
+    "--sort",
+    options.sort,
+  ];
+  addFlag(args, options.direction === "desc", "--desc");
+  addOptionValue(args, "--query", options.query.trim());
+  addOptionValue(args, "--path", options.path || options.musicFolder.trim());
+  return args;
+}
+
+function addFlag(args: string[], enabled: boolean, flag: string) {
+  if (enabled) {
+    args.push(flag);
+  }
+}
+
+function addOptionValue(args: string[], flag: string, value: string) {
+  if (value) {
+    args.push(flag, value);
+  }
+}
+
+function browseStatusMessage(payload: BrowsePayload): string {
+  if (!payload.cwd) {
+    return "No indexed library roots found";
+  }
+  return payload.mode === "search" ? "Library search loaded" : "Library browser loaded";
+}
+
 type BuildIndexStepsOptions = {
   musicFolder: string;
   analysisMode: IndexAnalysisMode;
@@ -2736,50 +3097,39 @@ function formatClock(date: Date): string {
 }
 
 function searchSuggestionsFromDiagnostics(diagnostics: Record<string, unknown>): SearchSuggestion[] {
-  const value = diagnostics.suggested_queries;
-  if (!Array.isArray(value)) {
-    return [];
+  return arrayValue(diagnostics.suggested_queries)
+    .map(searchSuggestionFromUnknown)
+    .filter(isPresent);
+}
+
+function searchSuggestionFromUnknown(value: unknown): SearchSuggestion | null {
+  const record = recordValue(value);
+  const query = stringValue(record.query).trim();
+  if (!query) {
+    return null;
   }
-  const suggestions: SearchSuggestion[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") {
-      continue;
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.query !== "string" || !record.query.trim()) {
-      continue;
-    }
-    suggestions.push({
-      query: record.query,
-      confidence: typeof record.confidence === "number" ? record.confidence : undefined,
-      reason: typeof record.reason === "string" ? record.reason : undefined,
-      kind: typeof record.kind === "string" ? record.kind : undefined,
-      type: typeof record.type === "string" ? record.type : undefined,
-      label: typeof record.label === "string" ? record.label : undefined,
-    });
-  }
-  return suggestions;
+  return {
+    query,
+    confidence: numberValue(record.confidence),
+    reason: stringOrUndefined(record.reason),
+    kind: stringOrUndefined(record.kind),
+    type: stringOrUndefined(record.type),
+    label: stringOrUndefined(record.label),
+  };
 }
 
 function searchTypeExamplesFromDiagnostics(diagnostics: Record<string, unknown>): SearchTypeExample[] {
-  const value = diagnostics.search_type_examples;
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const examples: SearchTypeExample[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") {
-      continue;
-    }
-    const record = item as Record<string, unknown>;
-    examples.push({
-      type: typeof record.type === "string" ? record.type : undefined,
-      label: typeof record.label === "string" ? record.label : undefined,
-      query: typeof record.query === "string" ? record.query : null,
-      reason: typeof record.reason === "string" ? record.reason : undefined,
-    });
-  }
-  return examples;
+  return arrayValue(diagnostics.search_type_examples).map(searchTypeExampleFromUnknown);
+}
+
+function searchTypeExampleFromUnknown(value: unknown): SearchTypeExample {
+  const record = recordValue(value);
+  return {
+    type: stringOrUndefined(record.type),
+    label: stringOrUndefined(record.label),
+    query: stringOrNull(record.query),
+    reason: stringOrUndefined(record.reason),
+  };
 }
 
 function compactSearchSuggestions(suggestions: SearchSuggestion[]): SearchSuggestion[] {
@@ -2828,25 +3178,32 @@ function searchNoticeFromDiagnostics(diagnostics: Record<string, unknown>): Sear
   };
 }
 
+const SEARCH_NOTICE_COPY_RULES = [
+  {
+    tokens: ["no strong local evidence"],
+    text: "No strong local evidence found. Try one of the suggestions below.",
+  },
+  {
+    tokens: ["low confidence", "weak"],
+    text: "Best matches look weak. Try a more specific query, or enable Debug mode for score details.",
+  },
+  {
+    tokens: ["semantic"],
+    text: "Results rely mostly on similarity signals. Try adding an artist, genre, mood, or feature.",
+  },
+] as const;
+
 function searchNoticeDisplayText(notice: SearchNotice, debugMode: boolean): string {
   const message = notice.message?.trim() || "";
-  if (!message) {
-    return "";
-  }
-  if (debugMode) {
-    return message;
-  }
+  return debugMode ? message : mappedNoticeMessage(message);
+}
+
+function mappedNoticeMessage(message: string): string {
   const lower = message.toLowerCase();
-  if (lower.includes("no strong local evidence")) {
-    return "No strong local evidence found. Try one of the suggestions below.";
-  }
-  if (lower.includes("low confidence") || lower.includes("weak")) {
-    return "Best matches look weak. Try a more specific query, or enable Debug mode for score details.";
-  }
-  if (lower.includes("semantic")) {
-    return "Results rely mostly on similarity signals. Try adding an artist, genre, mood, or feature.";
-  }
-  return message;
+  const match = SEARCH_NOTICE_COPY_RULES.find((rule) =>
+    rule.tokens.some((token) => lower.includes(token)),
+  );
+  return match?.text || message;
 }
 
 function chipList(values: string[] | undefined, max = 8): string {
@@ -2867,6 +3224,11 @@ function formatFeaturePreferences(preferences: Record<string, string> | undefine
     .join(" · ");
 }
 
+function formatFeatureRanges(intent: SearchIntentSummary): string {
+  const entries = Object.entries(intent.feature_ranges ?? {});
+  return entries.length ? entries.map(formatFeatureRange).join(" · ") : "none";
+}
+
 function formatFeatureRange([field, range]: [string, SearchFeatureRange]): string {
   const low = numericText(range.low);
   const high = numericText(range.high);
@@ -2874,10 +3236,23 @@ function formatFeatureRange([field, range]: [string, SearchFeatureRange]): strin
   return `${field.replaceAll("_", " ")} ${low}–${high}${source}`;
 }
 
+function formatSortSpecs(intent: SearchIntentSummary): string {
+  return formatSortSpecList(intent.sort_by);
+}
+
+function formatSortSpecList(specs: SearchSortSpec[] | undefined): string {
+  const values = specs ?? [];
+  return values.length ? values.map(formatSortSpec).join(" · ") : "none";
+}
+
 function formatSortSpec(spec: SearchSortSpec): string {
   const field = (spec.field || "unknown").replaceAll("_", " ");
   const direction = spec.direction === "asc" ? "lowest first" : "highest first";
   return `${field} ${direction}`;
+}
+
+function formatScoreCalibration(diagnostics: Record<string, unknown>): string {
+  return String(diagnostics.score_calibration || diagnostics.score_normalization || "raw");
 }
 
 function searchEvidenceCountStages(diagnostics: Record<string, unknown>): EvidenceCountStages {
@@ -2889,34 +3264,58 @@ function searchEvidenceCountStages(diagnostics: Record<string, unknown>): Eviden
 }
 
 function formatSearchDiagnostics(diagnostics: Record<string, unknown>, scoreWarnings: string[]): string {
+  return searchDiagnosticParts(diagnostics, scoreWarnings).filter(isNonEmptyString).join(" · ");
+}
+
+function searchDiagnosticParts(diagnostics: Record<string, unknown>, scoreWarnings: string[]): Array<string | null> {
   return [
     metricText("top", diagnostics.top_raw_score),
     metricText("filtered", diagnostics.filtered_candidate_count),
-    diagnostics.duplicate_suppression_enabled === false
-      ? "duplicates shown"
-      : metricText("deduped", diagnostics.duplicate_suppressed_count),
-    diagnostics.diversity_suppression_enabled === false ? "same artists shown" : null,
-    scoreWarnings.length ? `warnings ${scoreWarnings.join(", ")}` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+    duplicateDiagnosticText(diagnostics),
+    diversityDiagnosticText(diagnostics),
+    warningDiagnosticText(scoreWarnings),
+  ];
+}
+
+function duplicateDiagnosticText(diagnostics: Record<string, unknown>): string | null {
+  return diagnostics.duplicate_suppression_enabled === false
+    ? "duplicates shown"
+    : metricText("deduped", diagnostics.duplicate_suppressed_count);
+}
+
+function diversityDiagnosticText(diagnostics: Record<string, unknown>): string {
+  return diagnostics.diversity_suppression_enabled === false ? "same artists shown" : "";
+}
+
+function warningDiagnosticText(scoreWarnings: string[]): string {
+  return scoreWarnings.length ? `warnings ${scoreWarnings.join(", ")}` : "";
 }
 
 function formatEvidenceCountStages(
   stages: ReadonlyArray<readonly [string, Record<string, unknown>]>,
 ): string {
-  const parts = stages
-    .map(([stage, counts]) => {
-      let total = 0;
-      for (const value of Object.values(counts)) {
-        if (typeof value === "number" && Number.isFinite(value)) {
-          total += value;
-        }
-      }
-      return total > 0 ? `${stage} ${total}` : null;
-    })
-    .filter((part): part is string => Boolean(part));
+  const parts = stages.map(evidenceStageText).filter(isNonEmptyString);
   return parts.length ? parts.join(" · ") : "none";
+}
+
+function evidenceStageText([stage, counts]: readonly [string, Record<string, unknown>]): string {
+  return positiveStageText(stage, recordNumberTotal(counts));
+}
+
+function positiveStageText(stage: string, total: number): string {
+  return total > 0 ? `${stage} ${total}` : "";
+}
+
+function recordNumberTotal(counts: Record<string, unknown>): number {
+  return Object.values(counts).reduce(addFiniteNumber, 0);
+}
+
+function addFiniteNumber(total: number, value: unknown): number {
+  return isFiniteNumber(value) ? total + value : total;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function formatRecordCounts(counts: Record<string, unknown>): string {
@@ -2933,19 +3332,31 @@ function formatRecordCounts(counts: Record<string, unknown>): string {
 }
 
 function formatRankReason(reason: SearchResult["rank_reason"]): string {
-  if (!reason) {
-    return "";
-  }
-  const parts = [
-    reason.summary || reason.primary?.replaceAll("_", " "),
-    reason.mode ? `mode ${reason.mode.replaceAll("_", " ")}` : null,
-    reason.sort
-      ? `${reason.sort.label || reason.sort.field || "sort"} ${reason.sort.direction || ""} ${numericText(
-          reason.sort.value,
-        )}`.trim()
-      : null,
-  ].filter(Boolean);
-  return parts.join(" · ");
+  return reason ? rankReasonParts(reason).join(" · ") : "";
+}
+
+function rankReasonParts(reason: NonNullable<SearchResult["rank_reason"]>): string[] {
+  return [rankSummaryText(reason), rankModeText(reason), rankSortText(reason)].filter(isNonEmptyString);
+}
+
+function rankSummaryText(reason: NonNullable<SearchResult["rank_reason"]>): string {
+  return reason.summary || reason.primary?.replaceAll("_", " ") || "";
+}
+
+function rankModeText(reason: NonNullable<SearchResult["rank_reason"]>): string {
+  return reason.mode ? `mode ${reason.mode.replaceAll("_", " ")}` : "";
+}
+
+function rankSortText(reason: NonNullable<SearchResult["rank_reason"]>): string {
+  return reason.sort ? rankSortLabel(reason.sort).trim() : "";
+}
+
+function rankSortLabel(sort: NonNullable<NonNullable<SearchResult["rank_reason"]>["sort"]>): string {
+  return `${sortLabel(sort)} ${sort.direction || ""} ${numericText(sort.value)}`;
+}
+
+function sortLabel(sort: NonNullable<NonNullable<SearchResult["rank_reason"]>["sort"]>): string {
+  return sort.label || sort.field || "sort";
 }
 
 function formatMatchCandidateScores(scores: Record<string, number>): string {
@@ -2970,22 +3381,37 @@ function formatMatchCandidateScores(scores: Record<string, number>): string {
 }
 
 function formatCandidateEvidence(evidence: SearchResult["candidate_evidence"]): string {
-  if (!evidence) {
-    return "";
-  }
-  const sources = evidence.retrieved_by?.length
-    ? evidence.retrieved_by.map((source) => source.replaceAll("_", " ")).join(", ")
-    : "none";
-  const identity = evidence.identity
-    ? Object.entries(evidence.identity)
-        .filter(([, available]) => available)
-        .map(([key]) => key.replaceAll("_", " "))
-        .join(", ")
-    : "";
-  const flags = [evidence.semantic_only ? "semantic only" : null, identity ? `identity ${identity}` : null]
-    .filter(Boolean)
-    .join(" · ");
-  return flags ? `${sources} · ${flags}` : sources;
+  return evidence ? candidateEvidenceParts(evidence).join(" · ") : "";
+}
+
+function candidateEvidenceParts(evidence: NonNullable<SearchResult["candidate_evidence"]>): string[] {
+  return [retrievalSourcesText(evidence), semanticOnlyText(evidence), identitySignalsText(evidence)].filter(
+    isNonEmptyString,
+  );
+}
+
+function retrievalSourcesText(evidence: NonNullable<SearchResult["candidate_evidence"]>): string {
+  return evidence.retrieved_by?.length ? evidence.retrieved_by.map(prettyKey).join(", ") : "none";
+}
+
+function semanticOnlyText(evidence: NonNullable<SearchResult["candidate_evidence"]>): string {
+  return evidence.semantic_only ? "semantic only" : "";
+}
+
+function identitySignalsText(evidence: NonNullable<SearchResult["candidate_evidence"]>): string {
+  const signals = Object.entries(evidence.identity ?? {})
+    .filter(([, available]) => available)
+    .map(([key]) => prettyKey(key))
+    .join(", ");
+  return signals ? `identity ${signals}` : "";
+}
+
+function prettyKey(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function formatWeights(weights: Record<string, unknown>): string {
@@ -3008,11 +3434,36 @@ function numericText(value: unknown): string {
   return String(value ?? "—");
 }
 
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function recordValue(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  const text = stringValue(value);
+  return text || undefined;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
 }
 
 function stringList(value: unknown): string[] {
